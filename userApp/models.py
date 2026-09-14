@@ -266,3 +266,26 @@ class LessonProgress(models.Model):
     def __str__(self):
         return f"{self.user.email} — {self.lesson.title}: {self.progress_percentage}%"
 
+
+# =========================================================
+#  10. Razorpay Webhook Event Idempotency Model
+# =========================================================
+
+class RazorpayWebhookEvent(models.Model):
+    event_id = models.CharField(max_length=255, unique=True, db_index=True)
+    event_type = models.CharField(max_length=100, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=50, default='processed')
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    objects = models.Manager()
+
+    class Meta:
+        ordering = ['-processed_at']
+        verbose_name = 'Razorpay Webhook Event'
+        verbose_name_plural = 'Razorpay Webhook Events'
+
+    def __str__(self):
+        return f"Webhook {self.event_id} ({self.event_type}) - {self.status}"
+
+

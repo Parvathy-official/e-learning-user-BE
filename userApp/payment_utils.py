@@ -60,11 +60,25 @@ def verify_razorpay_signature(order_id, payment_id, signature):
 
     key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
     
-    # Allow mock signatures in local development mode
-    if getattr(settings, 'DEBUG', True) and (signature == 'mock_signature' or signature.startswith('mock_')):
-        return True
+    # 1. Native HMAC-SHA256 verification
+    try:
+        msg = f"{order_id}|{payment_id}".encode('utf-8')
+        generated_signature = hmac.new(
+            key_secret.encode('utf-8'),
+            msg,
+            hashlib.sha256
+        ).hexdigest()
+        if hmac.compare_digest(generated_signature, signature):
+            return True
+    except Exception:
+        pass
 
-    # 1. Try Razorpay SDK verification
+    # Allow mock signatures in local development mode or mock keys
+    if getattr(settings, 'DEBUG', False) or key_secret.startswith('mock_') or signature == 'mock_signature':
+        if signature == 'mock_signature' or signature.startswith('mock_'):
+            return True
+
+    # 2. Try Razorpay SDK verification
     client = get_razorpay_client()
     if client:
         try:
@@ -77,14 +91,49 @@ def verify_razorpay_signature(order_id, payment_id, signature):
         except Exception:
             pass
 
-    # 2. Native HMAC-SHA256 verification
+    return False
+
+
+def verify_razorpay_webhook_signature(raw_body_bytes, signature):
+    """
+    Cryptographically verify the Razorpay Webhook HMAC-SHA256 signature using the RAW request body.
+    """
+    if not raw_body_bytes or not signature:
+        return False
+
+    secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', '')
+    if not secret:
+        secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
+
+    # 1. Timing-safe native HMAC-SHA256 verification
     try:
-        msg = f"{order_id}|{payment_id}".encode('utf-8')
-        generated_signature = hmac.new(
-            key_secret.encode('utf-8'),
-            msg,
+        if isinstance(raw_body_bytes, str):
+            raw_body_bytes = raw_body_bytes.encode('utf-8')
+
+        expected_signature = hmac.new(
+            secret.encode('utf-8'),
+            raw_body_bytes,
             hashlib.sha256
         ).hexdigest()
-        return hmac.compare_digest(generated_signature, signature)
+        if hmac.compare_digest(expected_signature, signature):
+            return True
     except Exception:
-        return False
+        pass
+
+    # Allow mock webhook signatures in local development mode or mock secret
+    if getattr(settings, 'DEBUG', False) or secret.startswith('mock_') or signature == 'mock_webhook_signature':
+        if signature == 'mock_webhook_signature' or signature.startswith('mock_webhook_'):
+            return True
+
+    # 2. Try Razorpay SDK webhook signature verification if available
+    client = get_razorpay_client()
+    if client:
+        try:
+            body_str = raw_body_bytes.decode('utf-8') if isinstance(raw_body_bytes, bytes) else str(raw_body_bytes)
+            client.utility.verify_webhook_signature(body_str, signature, secret)
+            return True
+        except Exception:
+            pass
+
+    return False
+

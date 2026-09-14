@@ -222,3 +222,281 @@ class ELearningBackendSecurityTests(TestCase):
         enr_list = my_enr_resp.json()
         self.assertEqual(len(enr_list), 1)
         self.assertIn(str(self.protected_lesson.id), enr_list[0]['completed_lessons'])
+
+
+class RazorpayWebhookTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+
+        # Instructor
+        self.instructor = Instructor.objects.create(
+            name='Devon Vance',
+            title='Growth Architect'
+        )
+
+        # Course
+        self.course = Course.objects.create(
+            title='Paid Media Mastery',
+            slug='paid-media-mastery',
+            price=4999.00,
+            original_price=9999.00,
+            is_published=True,
+            instructor=self.instructor
+        )
+
+        # User
+        self.user = User.objects.create_user(
+            email='webhook_student@example.com',
+            name='Webhook Student',
+            password='Password123!'
+        )
+        self.tokens = generate_tokens(self.user)
+        self.auth_headers = {'HTTP_AUTHORIZATION': f"Bearer {self.tokens['access']}"}
+
+        # Payment record created (pending)
+        self.payment = Payment.objects.create(
+            user=self.user,
+            course=self.course,
+            razorpay_order_id='order_webhook_test_100',
+            amount=499900,
+            currency='INR',
+            status='created'
+        )
+
+    def test_webhook_invalid_signature_rejected(self):
+        payload = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_test_001',
+                        'order_id': self.payment.razorpay_order_id,
+                        'amount': 499900,
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='invalid_tampered_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_invalid_sig_test'
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, 'created')
+        self.assertFalse(Enrollment.objects.filter(user=self.user, course=self.course).exists())
+
+    def test_webhook_payment_captured_success(self):
+        payload = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_test_captured_001',
+                        'order_id': self.payment.razorpay_order_id,
+                        'amount': 499900,
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_cap_001'
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['status'], 'success')
+        self.assertEqual(data['event'], 'payment.captured')
+
+        # Verify Payment & Enrollment updated
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, 'paid')
+        self.assertEqual(self.payment.razorpay_payment_id, 'pay_test_captured_001')
+        self.assertTrue(Enrollment.objects.filter(user=self.user, course=self.course, status='active').exists())
+
+    def test_webhook_order_paid_success(self):
+        payload = {
+            'event': 'order.paid',
+            'payload': {
+                'order': {
+                    'entity': {
+                        'id': self.payment.razorpay_order_id,
+                        'amount': 499900,
+                        'status': 'paid'
+                    }
+                },
+                'payment': {
+                    'entity': {
+                        'id': 'pay_order_paid_002',
+                        'order_id': self.payment.razorpay_order_id,
+                    }
+                }
+            }
+        }
+        resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_order_paid_001'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, 'paid')
+        self.assertEqual(self.payment.razorpay_payment_id, 'pay_order_paid_002')
+        self.assertTrue(Enrollment.objects.filter(user=self.user, course=self.course).exists())
+
+    def test_webhook_idempotency_duplicate_event_ignored(self):
+        payload = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_test_dup_001',
+                        'order_id': self.payment.razorpay_order_id,
+                        'amount': 499900,
+                    }
+                }
+            }
+        }
+        # First delivery
+        resp1 = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_duplicate_test_100'
+        )
+        self.assertEqual(resp1.status_code, 200)
+        self.assertEqual(resp1.json()['status'], 'success')
+        self.assertEqual(Enrollment.objects.filter(user=self.user, course=self.course).count(), 1)
+
+        # Duplicate delivery with same event_id
+        resp2 = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_duplicate_test_100'
+        )
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json()['status'], 'ignored')
+        # Ensure enrollment was not duplicated
+        self.assertEqual(Enrollment.objects.filter(user=self.user, course=self.course).count(), 1)
+
+    def test_webhook_arrives_before_frontend_verification(self):
+        """
+        Scenario: User pays, Webhook arrives first and enrolls student.
+        User's browser later calls /payments/verify/.
+        Must succeed cleanly without duplicate enrollment.
+        """
+        # 1. Webhook arrives
+        payload = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_first_arrival_100',
+                        'order_id': self.payment.razorpay_order_id,
+                    }
+                }
+            }
+        }
+        wb_resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_arrival_first'
+        )
+        self.assertEqual(wb_resp.status_code, 200)
+
+        # 2. Frontend /verify/ arrives second
+        verify_resp = self.client.post(
+            '/api/payments/verify/',
+            data=json.dumps({
+                'razorpay_order_id': self.payment.razorpay_order_id,
+                'razorpay_payment_id': 'pay_first_arrival_100',
+                'razorpay_signature': 'mock_signature',
+            }),
+            content_type='application/json',
+            **self.auth_headers
+        )
+        self.assertEqual(verify_resp.status_code, 200)
+        self.assertTrue(verify_resp.json()['success'])
+        self.assertEqual(Enrollment.objects.filter(user=self.user, course=self.course).count(), 1)
+
+    def test_frontend_verification_arrives_before_webhook(self):
+        """
+        Scenario: User pays, Frontend /payments/verify/ arrives first.
+        Webhook arrives second.
+        Must succeed cleanly without duplicate enrollment.
+        """
+        # 1. Frontend /verify/ arrives first
+        verify_resp = self.client.post(
+            '/api/payments/verify/',
+            data=json.dumps({
+                'razorpay_order_id': self.payment.razorpay_order_id,
+                'razorpay_payment_id': 'pay_frontend_first_200',
+                'razorpay_signature': 'mock_signature',
+            }),
+            content_type='application/json',
+            **self.auth_headers
+        )
+        self.assertEqual(verify_resp.status_code, 200)
+        self.assertEqual(Enrollment.objects.filter(user=self.user, course=self.course).count(), 1)
+
+        # 2. Webhook arrives second
+        payload = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_frontend_first_200',
+                        'order_id': self.payment.razorpay_order_id,
+                    }
+                }
+            }
+        }
+        wb_resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_webhook_second_200'
+        )
+        self.assertEqual(wb_resp.status_code, 200)
+        # Enrollment count remains strictly 1
+        self.assertEqual(Enrollment.objects.filter(user=self.user, course=self.course).count(), 1)
+
+    def test_webhook_payment_failed(self):
+        payload = {
+            'event': 'payment.failed',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_failed_300',
+                        'order_id': self.payment.razorpay_order_id,
+                    }
+                }
+            }
+        }
+        wb_resp = self.client.post(
+            '/api/payments/webhook/',
+            data=json.dumps(payload),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='mock_webhook_signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_failed_300'
+        )
+        self.assertEqual(wb_resp.status_code, 200)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, 'failed')
+        self.assertFalse(Enrollment.objects.filter(user=self.user, course=self.course).exists())
+

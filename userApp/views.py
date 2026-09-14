@@ -5,9 +5,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
 from django.utils import timezone
 
-from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress
+from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, RazorpayWebhookEvent
 from .auth_utils import generate_tokens, get_authenticated_user, decode_refresh_token
-from .payment_utils import create_razorpay_order, verify_razorpay_signature
+from .payment_utils import create_razorpay_order, verify_razorpay_signature, verify_razorpay_webhook_signature
 from .video_utils import generate_signed_video_url
 
 
@@ -144,6 +144,8 @@ def auth_login(request):
             'name': user.name,
             'email': user.email,
             'avatar': user.avatar,
+            'is_staff': user.is_staff,
+            'is_superuser': user.is_superuser,
         },
         'access': tokens['access'],
         'refresh': tokens['refresh'],
@@ -171,6 +173,8 @@ def auth_me(request):
         'email': user.email,
         'avatar': user.avatar,
         'bio': user.bio,
+        'is_staff': user.is_staff,
+        'is_superuser': user.is_superuser,
         'joined': user.date_joined.strftime('%Y-%m-%d'),
     }, status=200)
 
@@ -690,6 +694,118 @@ def payment_status(request, order_id):
         'currency': payment.currency,
         'course_id': str(payment.course_id),
     }, status=200)
+
+
+@csrf_exempt
+def payment_webhook(request):
+    """
+    Razorpay Server-to-Server Webhook Receiver.
+    Verifies X-Razorpay-Signature against the RAW request body.
+    Enforces idempotency using X-Razorpay-Event-Id and RazorpayWebhookEvent.
+    Handles 'payment.captured', 'order.paid', 'payment.failed', 'payment.authorized'.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    raw_body = request.body
+    signature = request.headers.get('X-Razorpay-Signature') or request.META.get('HTTP_X_RAZORPAY_SIGNATURE', '')
+
+    if not signature:
+        return JsonResponse({'error': 'Missing X-Razorpay-Signature header'}, status=400)
+
+    # 1. Cryptographically verify signature on RAW request body
+    if not verify_razorpay_webhook_signature(raw_body, signature):
+        return JsonResponse({'error': 'Invalid webhook signature'}, status=400)
+
+    # 2. Parse payload safely
+    try:
+        payload = json.loads(raw_body.decode('utf-8'))
+    except Exception:
+        return JsonResponse({'error': 'Malformed JSON payload'}, status=400)
+
+    # 3. Check Event ID for Idempotency
+    event_id = (
+        request.headers.get('X-Razorpay-Event-Id') or
+        request.META.get('HTTP_X_RAZORPAY_EVENT_ID') or
+        payload.get('event_id') or
+        payload.get('id')
+    )
+
+    if event_id and RazorpayWebhookEvent.objects.filter(event_id=event_id).exists():
+        return JsonResponse({
+            'status': 'ignored',
+            'message': 'Duplicate webhook event already processed',
+            'event_id': event_id
+        }, status=200)
+
+    if not event_id:
+        event_id = f"evt_{int(timezone.now().timestamp() * 1000)}"
+
+    event_type = payload.get('event', '')
+
+    # 4. Handle events atomically
+    try:
+        if event_type in ('order.paid', 'payment.captured'):
+            order_entity = payload.get('payload', {}).get('order', {}).get('entity', {})
+            payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+
+            order_id = order_entity.get('id') or payment_entity.get('order_id')
+            payment_id = payment_entity.get('id')
+
+            if order_id:
+                payment = Payment.objects.filter(razorpay_order_id=order_id).select_related('user', 'course').first()
+                if payment:
+                    with transaction.atomic():
+                        payment.status = 'paid'
+                        if payment_id:
+                            payment.razorpay_payment_id = payment_id
+                        payment.save()
+
+                        # Ensure enrollment exists
+                        enrollment, _ = Enrollment.objects.get_or_create(
+                            user=payment.user,
+                            course=payment.course,
+                            defaults={
+                                'payment': payment,
+                                'status': 'active',
+                                'progress_percentage': 0,
+                            }
+                        )
+                        if not enrollment.payment:
+                            enrollment.payment = payment
+                            enrollment.save(update_fields=['payment'])
+
+        elif event_type == 'payment.failed':
+            payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+            order_id = payment_entity.get('order_id')
+            payment_id = payment_entity.get('id')
+
+            if order_id:
+                payment = Payment.objects.filter(razorpay_order_id=order_id).first()
+                if payment and payment.status != 'paid':
+                    with transaction.atomic():
+                        payment.status = 'failed'
+                        if payment_id:
+                            payment.razorpay_payment_id = payment_id
+                        payment.save()
+
+        elif event_type == 'payment.authorized':
+            # Payment authorized; captured / paid event will follow or auto-capture
+            pass
+
+        # 5. Record processed webhook event for idempotency
+        RazorpayWebhookEvent.objects.create(
+            event_id=event_id,
+            event_type=event_type,
+            payload=payload,
+            status='processed'
+        )
+
+        return JsonResponse({'status': 'success', 'event': event_type, 'event_id': event_id}, status=200)
+
+    except Exception as e:
+        return JsonResponse({'error': f'Failed to process webhook event: {str(e)}'}, status=500)
+
 
 
 # =========================================================

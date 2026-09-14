@@ -1,6 +1,15 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress
+from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, RazorpayWebhookEvent
+
+
+@admin.register(RazorpayWebhookEvent)
+class RazorpayWebhookEventAdmin(admin.ModelAdmin):
+    list_display = ('id', 'event_id', 'event_type', 'status', 'processed_at')
+    list_filter = ('event_type', 'status', 'processed_at')
+    search_fields = ('event_id', 'event_type')
+    readonly_fields = ('event_id', 'event_type', 'payload', 'status', 'processed_at')
+
 
 
 @admin.register(User)
