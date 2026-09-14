@@ -109,7 +109,8 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # CORS configuration
 CORS_ALLOWED_ORIGINS = [
-    os.getenv('FRONTEND_URL', 'http://localhost:5173'),
+    os.getenv('USER_FRONTEND_URL', 'http://localhost:5173'),
+    os.getenv('ADMIN_FRONTEND_URL', 'http://localhost:5174'),
     'http://localhost:5173',
     'http://localhost:5174',
     'http://localhost:5175',
