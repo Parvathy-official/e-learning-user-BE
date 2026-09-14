@@ -6,6 +6,7 @@ django-cors-headers==4.9.0
 django-stubs==6.1.0
 django-stubs-ext==6.1.0
 dotenv==0.9.9
+gunicorn==26.2.0
 idna==3.19
 psycopg2==2.9.12
 PyJWT==2.13.0
