@@ -208,4 +208,21 @@ class Command(BaseCommand):
                 }
             )
 
-        self.stdout.write(self.style.SUCCESS('Successfully seeded digital product masterclass data!'))
+            # 6. Create / Update Master Admin
+            admin_user, a_created = User.objects.get_or_create(
+                email='admin@learnflow.com',
+                defaults={
+                    'name': 'Master Admin',
+                    'is_staff': True,
+                    'is_superuser': True,
+                    'is_active': True,
+                }
+            )
+            admin_user.is_staff = True
+            admin_user.is_superuser = True
+            admin_user.is_active = True
+            admin_user.set_password('admin123')
+            admin_user.save()
+
+        self.stdout.write(self.style.SUCCESS('Successfully seeded digital product masterclass and admin data!'))
+
