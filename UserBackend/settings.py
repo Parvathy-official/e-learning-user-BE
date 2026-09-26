@@ -117,9 +117,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
-    'http://127.0.0.1:5173',
+    'https://e-learning-user.netlify.app',
     'https://e-learningadmin-fe.netlify.app',
-    
 ]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
