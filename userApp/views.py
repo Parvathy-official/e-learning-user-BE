@@ -868,12 +868,13 @@ def payment_verify(request):
     }, status=200)
 
 
+@csrf_exempt
 def payment_status(request, order_id):
     if request.method != 'GET':
         return JsonResponse({'error': 'Method not allowed'}, status=405)
 
     user = get_authenticated_user(request)
-    payment = Payment.objects.filter(razorpay_order_id=order_id).first()
+    payment = Payment.objects.filter(razorpay_order_id=order_id).select_related('user', 'course').first()
     if not payment:
         return JsonResponse({'error': 'Order not found'}, status=404)
 
@@ -881,13 +882,26 @@ def payment_status(request, order_id):
     if user and payment.user_id != user.id:
         return JsonResponse({'error': 'Order not found'}, status=404)
 
-    return JsonResponse({
+    res = {
         'order_id': payment.razorpay_order_id,
         'status': payment.status,
         'amount': payment.amount,
         'currency': payment.currency,
         'course_id': str(payment.course_id),
-    }, status=200)
+    }
+
+    if payment.status == 'paid' and payment.user:
+        tokens = generate_tokens(payment.user)
+        res['access'] = tokens['access']
+        res['refresh'] = tokens['refresh']
+        res['user'] = {
+            'id': payment.user.id,
+            'name': payment.user.name,
+            'email': payment.user.email,
+            'avatar': payment.user.avatar,
+        }
+
+    return JsonResponse(res, status=200)
 
 
 
