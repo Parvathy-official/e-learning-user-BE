@@ -5,10 +5,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
 from django.utils import timezone
 
-from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, RazorpayWebhookEvent
+from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, RazorpayWebhookEvent, EmailOTP
 from .auth_utils import generate_tokens, get_authenticated_user, decode_refresh_token
 from .payment_utils import create_razorpay_order, verify_razorpay_signature, verify_razorpay_webhook_signature
 from .video_utils import generate_signed_video_url
+from .otp_utils import create_and_send_otp, verify_otp_code
 
 
 # =========================================================
@@ -218,6 +219,92 @@ def auth_token_refresh(request):
     }, status=200)
 
 
+@csrf_exempt
+def auth_request_otp(request):
+    """
+    Request a one-time verification code sent to the user's email.
+    Supports passwordless login for returning customers.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    data = parse_json_body(request)
+    if not data or not data.get('email'):
+        return JsonResponse({'error': 'Email address is required'}, status=400)
+
+    email = data.get('email', '').strip().lower()
+    if not email or '@' not in email or '.' not in email:
+        return JsonResponse({'error': 'Please enter a valid email address'}, status=400)
+
+    success, msg = create_and_send_otp(email)
+    if not success:
+        status_code = 429 if 'wait' in msg.lower() else 500
+        return JsonResponse({'error': msg}, status=status_code)
+
+    return JsonResponse({
+        'success': True,
+        'message': msg,
+        'email': email,
+    }, status=200)
+
+
+@csrf_exempt
+def auth_verify_otp(request):
+    """
+    Verify the one-time code and issue JWT tokens.
+    Passwordless session creation and entitlement retrieval.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    data = parse_json_body(request)
+    if not data:
+        return JsonResponse({'error': 'Invalid request body'}, status=400)
+
+    email = data.get('email', '').strip().lower()
+    otp = str(data.get('otp', '')).strip()
+
+    if not email or not otp:
+        return JsonResponse({'error': 'Email and verification code are required'}, status=400)
+
+    success, msg = verify_otp_code(email, otp)
+    if not success:
+        return JsonResponse({'error': msg}, status=400)
+
+    # Find or create user
+    user = User.objects.filter(email__iexact=email).first()
+    if not user:
+        name = email.split('@')[0].capitalize()
+        user = User.objects.create_user(email=email, name=name)
+
+    if not user.is_active:
+        return JsonResponse({'error': 'Account is disabled'}, status=403)
+
+    tokens = generate_tokens(user)
+
+    # Return active enrolled course IDs so frontend can synchronize access immediately
+    enrolled_courses = list(
+        Enrollment.objects.filter(user=user, status='active').values_list('course_id', flat=True)
+    )
+
+    return JsonResponse({
+        'success': True,
+        'message': 'Successfully verified and logged in',
+        'user': {
+            'id': user.id,
+            'name': user.name,
+            'email': user.email,
+            'avatar': user.avatar,
+            'is_staff': user.is_staff,
+            'is_superuser': user.is_superuser,
+        },
+        'enrolled_course_ids': [str(cid) for cid in enrolled_courses],
+        'access': tokens['access'],
+        'refresh': tokens['refresh'],
+    }, status=200)
+
+
+
 # =========================================================
 #  2. COURSES VIEWS
 # =========================================================
@@ -321,14 +408,23 @@ def course_access(request, id):
     if request.method != 'GET':
         return JsonResponse({'error': 'Method not allowed'}, status=405)
 
+    if str(id).isdigit():
+        course = Course.objects.filter(id=int(id)).first()
+    else:
+        course = Course.objects.filter(slug=id).first()
+
+    if not course:
+        return JsonResponse({'error': 'Course not found'}, status=404)
+
     user = get_authenticated_user(request)
     if not user:
-        return JsonResponse({'has_access': False, 'enrollment': None}, status=200)
+        return JsonResponse({'has_access': False, 'authenticated': False, 'enrollment': None}, status=200)
 
-    enrollment = Enrollment.objects.filter(user=user, course_id=id, status='active').first()
+    enrollment = Enrollment.objects.filter(user=user, course=course, status='active').first()
     if enrollment:
         return JsonResponse({
             'has_access': True,
+            'authenticated': True,
             'enrollment': {
                 'id': str(enrollment.id),
                 'course_id': str(enrollment.course_id),
@@ -338,7 +434,8 @@ def course_access(request, id):
             },
         }, status=200)
 
-    return JsonResponse({'has_access': False, 'enrollment': None}, status=200)
+    return JsonResponse({'has_access': False, 'authenticated': True, 'enrollment': None}, status=200)
+
 
 
 # =========================================================
@@ -576,41 +673,113 @@ def my_enrollments(request):
 # =========================================================
 #  5. PAYMENTS VIEWS (RAZORPAY)
 # =========================================================
+# =========================================================
+# 5. PAYMENTS VIEWS (RAZORPAY)
+# =========================================================
 
 @csrf_exempt
 def payment_create_order(request):
     """
     Create a Razorpay order for a course.
-    Price is determined strictly by the database, NEVER trusted from frontend.
-    """
-    if request.method != 'POST':
-        return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-    user = get_authenticated_user(request)
-    if not user:
-        return JsonResponse({'error': 'Authentication required to make a payment'}, status=401)
+    Authentication is NOT required.
+    User provides name and email during checkout.
+    Price is always taken from the database.
+    """
+
+    if request.method != 'POST':
+        return JsonResponse(
+            {'error': 'Method not allowed'},
+            status=405
+        )
 
     data = parse_json_body(request)
+
     if not data or not data.get('course_id'):
-        return JsonResponse({'error': 'course_id is required'}, status=400)
+        return JsonResponse(
+            {'error': 'course_id is required'},
+            status=400
+        )
 
     course_id = data['course_id']
-    course = Course.objects.filter(id=course_id, is_published=True).first()
-    if not course:
-        return JsonResponse({'error': 'Course not found or not published'}, status=404)
 
-    # Check if user is already enrolled
-    if Enrollment.objects.filter(user=user, course=course, status='active').exists():
-        return JsonResponse({'error': 'You are already enrolled in this course'}, status=409)
+    # Get published course
+    course = Course.objects.filter(
+        id=course_id,
+        is_published=True
+    ).first()
+
+    if not course:
+        return JsonResponse(
+            {'error': 'Course not found or not published'},
+            status=404
+        )
+
+    # ---------------------------------------------------------
+    # Get checkout details
+    # Authentication is completely ignored.
+    # ---------------------------------------------------------
+
+    email = data.get('email', '').strip().lower()
+    name = data.get('name', '').strip()
+
+    if not email or not name:
+        return JsonResponse(
+            {'error': 'Full name and email are required for checkout'},
+            status=400
+        )
+
+    # ---------------------------------------------------------
+    # Find existing user or create a new one
+    # ---------------------------------------------------------
+
+    user = User.objects.filter(
+        email__iexact=email
+    ).first()
+
+    if not user:
+        user = User.objects.create_user(
+            email=email,
+            name=name
+        )
+    elif name and not user.name:
+        user.name = name
+        user.save(update_fields=['name'])
+
+    # ---------------------------------------------------------
+    # Check existing enrollment
+    # ---------------------------------------------------------
+
+    if Enrollment.objects.filter(
+        user=user,
+        course=course,
+        status='active'
+    ).exists():
+        return JsonResponse(
+            {'error': 'You are already enrolled in this course'},
+            status=409
+        )
+
+    # ---------------------------------------------------------
+    # Get course price directly from database
+    # ---------------------------------------------------------
 
     amount_paise = course.price_in_paise
+
+    # ---------------------------------------------------------
+    # Create Razorpay order
+    # ---------------------------------------------------------
+
     order_data = create_razorpay_order(
         amount_paise=amount_paise,
         currency='INR',
         receipt=f"rcpt_u{user.id}_c{course.id}_{int(timezone.now().timestamp())}"
     )
 
+    # ---------------------------------------------------------
     # Save payment record
+    # ---------------------------------------------------------
+
     Payment.objects.create(
         user=user,
         course=course,
@@ -620,13 +789,16 @@ def payment_create_order(request):
         status='created'
     )
 
+    # ---------------------------------------------------------
+    # Return Razorpay details
+    # ---------------------------------------------------------
+
     return JsonResponse({
         'order_id': order_data['order_id'],
         'amount': order_data['amount'],
         'currency': order_data['currency'],
         'key': order_data['key'],
     }, status=200)
-
 
 @csrf_exempt
 def payment_verify(request):
@@ -638,7 +810,6 @@ def payment_verify(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-    user = get_authenticated_user(request)
     data = parse_json_body(request) or {}
 
     order_id = data.get('razorpay_order_id', '').strip()
@@ -652,14 +823,11 @@ def payment_verify(request):
     if not payment:
         return JsonResponse({'error': 'Payment order record not found'}, status=404)
 
-    # Ensure requesting user matches payment user if user is logged in
-    if user and payment.user_id != user.id:
-        return JsonResponse({'error': 'Unauthorized: Payment does not belong to this user'}, status=403)
-
     target_user = payment.user
 
     # Verify signature
     is_valid = verify_razorpay_signature(order_id, payment_id, signature)
+
     if not is_valid:
         payment.status = 'failed'
         payment.save()
@@ -682,11 +850,21 @@ def payment_verify(request):
             }
         )
 
+    tokens = generate_tokens(target_user)
+
     return JsonResponse({
         'success': True,
         'message': 'Payment successfully verified and enrolled',
         'enrollment_id': str(enrollment.id),
         'course_id': str(payment.course_id),
+        'user': {
+            'id': target_user.id,
+            'name': target_user.name,
+            'email': target_user.email,
+            'avatar': target_user.avatar,
+        },
+        'access': tokens['access'],
+        'refresh': tokens['refresh'],
     }, status=200)
 
 
@@ -695,11 +873,12 @@ def payment_status(request, order_id):
         return JsonResponse({'error': 'Method not allowed'}, status=405)
 
     user = get_authenticated_user(request)
-    if not user:
-        return JsonResponse({'error': 'Unauthenticated'}, status=401)
-
-    payment = Payment.objects.filter(razorpay_order_id=order_id, user=user).first()
+    payment = Payment.objects.filter(razorpay_order_id=order_id).first()
     if not payment:
+        return JsonResponse({'error': 'Order not found'}, status=404)
+
+    # Privacy: If a different user is logged in, do not expose other users' payment records
+    if user and payment.user_id != user.id:
         return JsonResponse({'error': 'Order not found'}, status=404)
 
     return JsonResponse({
@@ -709,6 +888,8 @@ def payment_status(request, order_id):
         'currency': payment.currency,
         'course_id': str(payment.course_id),
     }, status=200)
+
+
 
 
 @csrf_exempt

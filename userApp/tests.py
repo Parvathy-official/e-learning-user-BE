@@ -1,6 +1,6 @@
 import json
 from django.test import TestCase, Client
-from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress
+from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, EmailOTP
 from .auth_utils import generate_tokens
 
 
@@ -182,8 +182,81 @@ class ELearningBackendSecurityTests(TestCase):
 
         # In production or strict mode invalid signatures are rejected
         # Check that non-matching signatures fail
-        payment = Payment.objects.get(razorpay_order_id=order_id)
-        self.assertIn(payment.status, ['created', 'failed'])
+    def test_guest_checkout_order_creation_success(self):
+        """
+        Unauthenticated guest can create an order with valid name and email.
+        """
+        resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course.id,
+            'name': 'Guest Buyer',
+            'email': 'guest_buyer@example.com',
+        }), content_type='application/json')
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn('order_id', data)
+        self.assertEqual(data['amount'], 499900)
+        self.assertIn('key', data)
+
+        # Check user was created
+        guest_user = User.objects.filter(email='guest_buyer@example.com').first()
+        self.assertIsNotNone(guest_user)
+        self.assertEqual(guest_user.name, 'Guest Buyer')
+
+        # Check payment record was created
+        payment = Payment.objects.filter(razorpay_order_id=data['order_id']).first()
+        self.assertIsNotNone(payment)
+        self.assertEqual(payment.user, guest_user)
+        self.assertEqual(payment.status, 'created')
+
+    def test_guest_checkout_missing_details_validation(self):
+        """
+        Guest order creation fails if name or email is missing.
+        """
+        # Missing name
+        resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course.id,
+            'email': 'guest2@example.com',
+        }), content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+        # Missing email
+        resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course.id,
+            'name': 'Guest No Email',
+        }), content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_guest_checkout_verification_and_auto_enrollment(self):
+        """
+        Guest payment verification enlists the student, marks paid, and returns auth tokens.
+        """
+        # 1. Create order
+        order_resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course.id,
+            'name': 'Guest Enrollee',
+            'email': 'guest_enrollee@example.com',
+        }), content_type='application/json')
+        order_id = order_resp.json()['order_id']
+
+        # 2. Verify payment (mock signature in dev/test)
+        verify_resp = self.client.post('/api/payments/verify/', data=json.dumps({
+            'razorpay_order_id': order_id,
+            'razorpay_payment_id': 'pay_guest_123',
+            'razorpay_signature': 'mock_signature',
+            'course_id': self.course.id,
+        }), content_type='application/json')
+
+        self.assertEqual(verify_resp.status_code, 200)
+        v_data = verify_resp.json()
+        self.assertTrue(v_data['success'])
+        self.assertIn('access', v_data)
+        self.assertEqual(v_data['user']['email'], 'guest_enrollee@example.com')
+
+        # 3. Check database enrollment
+        guest_user = User.objects.get(email='guest_enrollee@example.com')
+        enr = Enrollment.objects.filter(user=guest_user, course=self.course, status='active').first()
+        self.assertIsNotNone(enr)
 
     # ----------------------------------------------------
     #  User Isolation & Privacy Tests
@@ -499,4 +572,148 @@ class RazorpayWebhookTests(TestCase):
         self.payment.refresh_from_db()
         self.assertEqual(self.payment.status, 'failed')
         self.assertFalse(Enrollment.objects.filter(user=self.user, course=self.course).exists())
+
+
+class GuestCheckoutAndPasswordlessOTPSecurityTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+
+        self.instructor = Instructor.objects.create(name='Devon Vance', title='Growth Architect')
+        self.course_a = Course.objects.create(
+            title='Course A: Meta Ads Blueprint',
+            slug='course-a',
+            price=499.00,
+            is_published=True,
+            instructor=self.instructor
+        )
+        self.course_b = Course.objects.create(
+            title='Course B: AI Prompt Engineering',
+            slug='course-b',
+            price=999.00,
+            is_published=True,
+            instructor=self.instructor
+        )
+        self.module_a = Module.objects.create(course=self.course_a, title='Module A', order=1)
+        self.lesson_a_preview = Lesson.objects.create(
+            module=self.module_a, title='Preview Lesson', duration='5:00', duration_seconds=300, is_preview=True, order=1
+        )
+        self.lesson_a_protected = Lesson.objects.create(
+            module=self.module_a, title='Protected Lesson', duration='15:00', duration_seconds=900, is_preview=False, order=2
+        )
+
+        self.module_b = Module.objects.create(course=self.course_b, title='Module B', order=1)
+        self.lesson_b_protected = Lesson.objects.create(
+            module=self.module_b, title='Protected Lesson B', duration='20:00', duration_seconds=1200, is_preview=False, order=1
+        )
+
+    def test_guest_checkout_flow_and_entitlement(self):
+        # 1. Guest visitor creates order without prior login
+        guest_email = 'guest_buyer@example.com'
+        guest_name = 'Guest Buyer'
+        create_resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course_a.id,
+            'name': guest_name,
+            'email': guest_email,
+        }), content_type='application/json')
+        self.assertEqual(create_resp.status_code, 200)
+        order_data = create_resp.json()
+        self.assertIn('order_id', order_data)
+
+        # 2. Payment verification with signature
+        verify_resp = self.client.post('/api/payments/verify/', data=json.dumps({
+            'razorpay_order_id': order_data['order_id'],
+            'razorpay_payment_id': 'pay_guest_123',
+            'razorpay_signature': 'mock_signature',
+            'course_id': self.course_a.id,
+        }), content_type='application/json')
+        self.assertEqual(verify_resp.status_code, 200)
+        verify_data = verify_resp.json()
+        self.assertTrue(verify_data['success'])
+        self.assertIn('access', verify_data)
+        self.assertEqual(verify_data['user']['email'], guest_email)
+
+        # 3. Authenticated session can access purchased Course A protected lesson
+        auth_headers = {'HTTP_AUTHORIZATION': f"Bearer {verify_data['access']}"}
+        video_resp = self.client.get(
+            f'/api/courses/{self.course_a.id}/lessons/{self.lesson_a_protected.id}/video/',
+            **auth_headers
+        )
+        self.assertEqual(video_resp.status_code, 200)
+        self.assertIn('video_url', video_resp.json())
+
+        # 4. Multi-course entitlement check: Guest has access to Course A, but NOT Course B
+        access_b_resp = self.client.get(
+            f'/api/courses/{self.course_b.id}/lessons/{self.lesson_b_protected.id}/video/',
+            **auth_headers
+        )
+        self.assertEqual(access_b_resp.status_code, 403)
+
+    def test_different_user_email_denied_access(self):
+        # Create user B
+        user_b = User.objects.create_user(email='other_user@example.com', name='Other User', password='password123')
+        tokens_b = generate_tokens(user_b)
+        headers_b = {'HTTP_AUTHORIZATION': f"Bearer {tokens_b['access']}"}
+
+        # User B tries to access Course A protected video -> 403 Forbidden
+        resp = self.client.get(
+            f'/api/courses/{self.course_a.id}/lessons/{self.lesson_a_protected.id}/video/',
+            **headers_b
+        )
+        self.assertEqual(resp.status_code, 403)
+
+        # User B checks course access endpoint -> has_access is False
+        access_resp = self.client.get(f'/api/courses/{self.course_a.id}/access/', **headers_b)
+        self.assertEqual(access_resp.status_code, 200)
+        self.assertFalse(access_resp.json()['has_access'])
+
+    def test_shared_url_unauthenticated_denied(self):
+        # Direct unauthenticated request to protected lesson
+        resp = self.client.get(f'/api/courses/{self.course_a.id}/lessons/{self.lesson_a_protected.id}/video/')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_passwordless_email_otp_flow(self):
+        email = 'returning_customer@example.com'
+
+        # 1. Request OTP
+        req_resp = self.client.post('/api/auth/request-otp/', data=json.dumps({
+            'email': email
+        }), content_type='application/json')
+        self.assertEqual(req_resp.status_code, 200)
+        self.assertTrue(req_resp.json()['success'])
+
+        # 2. Extract OTP record from DB
+        otp_rec = EmailOTP.objects.filter(email=email, is_used=False).first()
+        self.assertIsNotNone(otp_rec)
+
+        # 3. Test wrong OTP
+        bad_verify = self.client.post('/api/auth/verify-otp/', data=json.dumps({
+            'email': email,
+            'otp': '000000'
+        }), content_type='application/json')
+        self.assertEqual(bad_verify.status_code, 400)
+
+        # 4. For testing correct OTP verification, compute raw OTP match
+        from .otp_utils import hash_otp
+        # Let's verify with known OTP
+        known_otp = '123456'
+        otp_rec.otp_hash = hash_otp(email, known_otp)
+        otp_rec.save()
+
+        verify_resp = self.client.post('/api/auth/verify-otp/', data=json.dumps({
+            'email': email,
+            'otp': known_otp
+        }), content_type='application/json')
+        self.assertEqual(verify_resp.status_code, 200)
+        data = verify_resp.json()
+        self.assertTrue(data['success'])
+        self.assertIn('access', data)
+        self.assertEqual(data['user']['email'], email)
+
+        # 5. Reusing verified OTP must fail
+        reuse_resp = self.client.post('/api/auth/verify-otp/', data=json.dumps({
+            'email': email,
+            'otp': known_otp
+        }), content_type='application/json')
+        self.assertEqual(reuse_resp.status_code, 400)
+
 

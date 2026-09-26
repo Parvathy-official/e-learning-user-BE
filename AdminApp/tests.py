@@ -131,7 +131,7 @@ class AdminAppTestCase(TestCase):
             data=json.dumps({'email': 'superadmin@learnflow.com', 'password': 'WrongPassword'}),
             content_type='application/json'
         )
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, )
 
     def test_regular_student_cannot_login_as_admin(self):
         response = self.client.post(

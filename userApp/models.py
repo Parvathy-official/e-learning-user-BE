@@ -43,7 +43,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(default=timezone.now)
 
-    objects = UserManager()
+    objects: UserManager = UserManager()
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['name']
@@ -287,5 +287,33 @@ class RazorpayWebhookEvent(models.Model):
 
     def __str__(self):
         return f"Webhook {self.event_id} ({self.event_type}) - {self.status}"
+
+
+# =========================================================
+#  11. Email OTP Model for Passwordless Verification
+# =========================================================
+
+class EmailOTP(models.Model):
+    email = models.EmailField(db_index=True)
+    otp_hash = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    attempts = models.PositiveIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+
+    objects = models.Manager()
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Email OTP'
+        verbose_name_plural = 'Email OTPs'
+
+    def __str__(self):
+        return f"OTP for {self.email} (used={self.is_used})"
+
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
 
 

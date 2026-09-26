@@ -6,9 +6,12 @@ urlpatterns = [
     # --- Authentication (Student/General) ---
     path('auth/register/', views.auth_register, name='auth_register'),
     path('auth/login/', views.auth_login, name='auth_login'),
+    path('auth/request-otp/', views.auth_request_otp, name='auth_request_otp'),
+    path('auth/verify-otp/', views.auth_verify_otp, name='auth_verify_otp'),
     path('auth/logout/', views.auth_logout, name='auth_logout'),
     path('auth/me/', views.auth_me, name='auth_me'),
     path('auth/token/refresh/', views.auth_token_refresh, name='auth_token_refresh'),
+
 
     # --- Courses (Public/Student) ---
     path('courses/', views.course_list, name='course_list'),
