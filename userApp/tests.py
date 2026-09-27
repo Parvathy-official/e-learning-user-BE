@@ -158,6 +158,8 @@ class ELearningBackendSecurityTests(TestCase):
         """
         resp = self.client.post('/api/payments/create-order/', data=json.dumps({
             'course_id': self.course.id,
+            'name': 'Test User',
+            'email': 'testuser@example.com',
             'tampered_amount': 100  # Attempting to pay 1 rupee
         }), content_type='application/json', **self.auth_headers_b)
 
@@ -168,7 +170,9 @@ class ELearningBackendSecurityTests(TestCase):
     def test_fake_razorpay_signature_rejected(self):
         # Create order
         order_resp = self.client.post('/api/payments/create-order/', data=json.dumps({
-            'course_id': self.course.id
+            'course_id': self.course.id,
+            'name': 'Fraud Tester',
+            'email': 'fraud_tester@example.com',
         }), content_type='application/json', **self.auth_headers_b)
         order_id = order_resp.json()['order_id']
 
@@ -715,5 +719,46 @@ class GuestCheckoutAndPasswordlessOTPSecurityTests(TestCase):
             'otp': known_otp
         }), content_type='application/json')
         self.assertEqual(reuse_resp.status_code, 400)
+
+    def test_multi_otp_requests_resilience(self):
+        """
+        If a user requests multiple OTPs within validity window, ANY of the active codes
+        should successfully authenticate them, eliminating race conditions.
+        """
+        from datetime import timedelta
+        from django.utils import timezone
+        from .otp_utils import hash_otp
+
+        email = 'multi_otp_student@example.com'
+        code1 = '111111'
+        code2 = '222222'
+
+        now = timezone.now()
+        # Simulate 2 codes created
+        EmailOTP.objects.create(
+            email=email,
+            otp_hash=hash_otp(email, code1),
+            expires_at=now + timedelta(minutes=15),
+            attempts=0,
+            is_used=False
+        )
+        EmailOTP.objects.create(
+            email=email,
+            otp_hash=hash_otp(email, code2),
+            expires_at=now + timedelta(minutes=15),
+            attempts=0,
+            is_used=False
+        )
+
+        # Entering the older code (code1) must succeed
+        verify_resp = self.client.post('/api/auth/verify-otp/', data=json.dumps({
+            'email': email,
+            'otp': code1
+        }), content_type='application/json')
+        self.assertEqual(verify_resp.status_code, 200)
+        self.assertTrue(verify_resp.json()['success'])
+
+        # Both records must now be marked is_used=True
+        self.assertEqual(EmailOTP.objects.filter(email=email, is_used=False).count(), 0)
 
 
