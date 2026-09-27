@@ -1,10 +1,27 @@
 import hashlib
 import secrets
+import threading
+import logging
 from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
 from django.core.mail import send_mail
 from .models import EmailOTP
+
+logger = logging.getLogger(__name__)
+
+
+def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str]):
+    try:
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+            fail_silently=False
+        )
+    except Exception as e:
+        logger.error(f"Failed to send OTP email to {recipient_list}: {e}")
 
 
 def generate_secure_otp() -> str:
@@ -20,7 +37,7 @@ def hash_otp(email: str, otp: str) -> str:
 
 def create_and_send_otp(email: str) -> tuple[bool, str]:
     """
-    Rate-limits, generates, stores hashed OTP, and sends email to user.
+    Rate-limits, generates, stores hashed OTP, and sends email to user in background.
     Returns (success: bool, message: str).
     """
     email = email.strip().lower()
@@ -59,18 +76,13 @@ def create_and_send_otp(email: str) -> tuple[bool, str]:
     )
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'LearnFlow Academy <noreply@learnflow.com>')
 
-    try:
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=from_email,
-            recipient_list=[email],
-            fail_silently=False
-        )
-    except Exception as e:
-        # In DEBUG mode, email may print to console if console backend or fall back gracefully
-        if not getattr(settings, 'DEBUG', False):
-            return False, "Failed to send verification email. Please try again."
+    # Dispatch email asynchronously in background thread so API response is instant (<100ms)
+    email_thread = threading.Thread(
+        target=_send_otp_email_worker,
+        args=(subject, message, from_email, [email]),
+        daemon=True
+    )
+    email_thread.start()
 
     return True, "Verification code sent to your email."
 
