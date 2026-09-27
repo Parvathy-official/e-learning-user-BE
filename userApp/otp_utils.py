@@ -1,7 +1,9 @@
+import os
 import hashlib
 import secrets
 import threading
 import logging
+import requests
 from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
@@ -12,6 +14,61 @@ logger = logging.getLogger(__name__)
 
 
 def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str]):
+    # 1. Resend HTTPS REST API (Port 443 - Recommended for Render)
+    resend_api_key = os.getenv('RESEND_API_KEY') or getattr(settings, 'RESEND_API_KEY', None)
+    if resend_api_key:
+        try:
+            resend_from = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or "LearnFlow Academy <onboarding@resend.dev>"
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {resend_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": resend_from,
+                    "to": recipient_list,
+                    "subject": subject,
+                    "text": message,
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Successfully sent OTP via Resend API to {recipient_list}")
+                return
+            else:
+                logger.error(f"Resend API error ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Resend HTTPS dispatch failed: {e}")
+
+    # 2. Brevo HTTPS REST API (Port 443)
+    brevo_api_key = os.getenv('BREVO_API_KEY') or getattr(settings, 'BREVO_API_KEY', None)
+    if brevo_api_key:
+        try:
+            sender_email = os.getenv('EMAIL_HOST_USER') or "noreply@learnflow.com"
+            resp = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": brevo_api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "sender": {"name": "LearnFlow Academy", "email": sender_email},
+                    "to": [{"email": r} for r in recipient_list],
+                    "subject": subject,
+                    "textContent": message,
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Successfully sent OTP via Brevo API to {recipient_list}")
+                return
+            else:
+                logger.error(f"Brevo API error ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Brevo HTTPS dispatch failed: {e}")
+
+    # 3. Fallback to standard Django send_mail (SMTP/Console)
     try:
         send_mail(
             subject=subject,
@@ -20,6 +77,7 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
             recipient_list=recipient_list,
             fail_silently=False
         )
+        logger.info(f"Successfully sent OTP via standard send_mail to {recipient_list}")
     except Exception as e:
         logger.error(f"Failed to send OTP email to {recipient_list}: {e}")
 
