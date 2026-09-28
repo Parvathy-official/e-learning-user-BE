@@ -1,4 +1,5 @@
 import json
+import logging
 from decimal import Decimal
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -10,6 +11,8 @@ from .auth_utils import generate_tokens, get_authenticated_user, decode_refresh_
 from .payment_utils import create_razorpay_order, verify_razorpay_signature, verify_razorpay_webhook_signature
 from .video_utils import generate_signed_video_url
 from .otp_utils import create_and_send_otp, verify_otp_code
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
@@ -789,6 +792,8 @@ def payment_create_order(request):
         status='created'
     )
 
+    logger.info(f"[Payment] Order created: order_id={order_data['order_id']}, user={user.email}, course_id={course.id}, amount={amount_paise}")
+
     # ---------------------------------------------------------
     # Return Razorpay details
     # ---------------------------------------------------------
@@ -816,11 +821,15 @@ def payment_verify(request):
     payment_id = data.get('razorpay_payment_id', '').strip()
     signature = data.get('razorpay_signature', '').strip()
 
+    logger.info(f"[Payment] Verification requested for order_id={order_id}, payment_id={payment_id}")
+
     if not order_id:
+        logger.warning("[Payment] Verification failed: razorpay_order_id is missing")
         return JsonResponse({'error': 'razorpay_order_id is required'}, status=400)
 
     payment = Payment.objects.filter(razorpay_order_id=order_id).select_related('user', 'course').first()
     if not payment:
+        logger.warning(f"[Payment] Order record not found in database for order_id={order_id}")
         return JsonResponse({'error': 'Payment order record not found'}, status=404)
 
     target_user = payment.user
@@ -831,6 +840,7 @@ def payment_verify(request):
     if not is_valid:
         payment.status = 'failed'
         payment.save()
+        logger.warning(f"[Payment] Signature verification failed for order_id={order_id}")
         return JsonResponse({'error': 'Payment verification failed: Invalid signature'}, status=400)
 
     # Mark payment as paid
@@ -849,6 +859,8 @@ def payment_verify(request):
                 'progress_percentage': 0,
             }
         )
+
+    logger.info(f"[Payment] Signature verified successfully. Payment #{payment.id} marked paid. Enrollment #{enrollment.id} active (created={created}) for user={target_user.email}, course={payment.course.title}")
 
     tokens = generate_tokens(target_user)
 
