@@ -155,8 +155,14 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'LearnFlow Academy <noreply@learnflow.com>')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
+
+# Resend HTTPS REST API (Port 443 — Recommended for Render)
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
+BREVO_API_KEY = os.getenv('BREVO_API_KEY', '')
+
 
 
 

@@ -137,3 +137,75 @@ def verify_razorpay_webhook_signature(raw_body_bytes, signature):
 
     return False
 
+
+def check_and_fulfill_razorpay_order(payment):
+    """
+    Directly query Razorpay API server-to-server to check if an order was paid and captured.
+    If Razorpay confirms order is paid, atomically marks Payment 'paid' and creates the active Enrollment.
+    Returns (is_paid, enrollment).
+    """
+    if not payment:
+        return False, None
+
+    from .models import Enrollment
+
+    if payment.status == 'paid':
+        enrollment = Enrollment.objects.filter(user=payment.user, course=payment.course, status='active').first()
+        return True, enrollment
+
+    client = get_razorpay_client()
+    if not client:
+        return False, None
+
+    try:
+        order_data = client.order.fetch(payment.razorpay_order_id)
+        if not order_data:
+            return False, None
+
+        order_status = order_data.get('status')
+        amount_paid = order_data.get('amount_paid', 0)
+
+        # Check if Razorpay order is paid and amount matches or exceeds payment amount
+        if order_status == 'paid' or (amount_paid > 0 and amount_paid >= payment.amount):
+            payments_data = client.order.payments(payment.razorpay_order_id)
+            items = payments_data.get('items', []) if isinstance(payments_data, dict) else []
+            captured_payment = next(
+                (p for p in items if p.get('status') == 'captured' or p.get('captured') is True),
+                items[0] if items else None
+            )
+
+            payment_id = captured_payment.get('id') if captured_payment else None
+
+            from django.db import transaction
+
+            with transaction.atomic():
+                payment.status = 'paid'
+                if payment_id and not payment.razorpay_payment_id:
+                    payment.razorpay_payment_id = payment_id
+                payment.save()
+
+                enrollment, _ = Enrollment.objects.get_or_create(
+                    user=payment.user,
+                    course=payment.course,
+                    defaults={
+                        'payment': payment,
+                        'status': 'active',
+                        'progress_percentage': 0,
+                    }
+                )
+                if not enrollment.payment:
+                    enrollment.payment = payment
+                    enrollment.save(update_fields=['payment'])
+
+            try:
+                from .otp_utils import send_enrollment_confirmation_email
+                send_enrollment_confirmation_email(payment.user, payment.course, payment=payment)
+            except Exception:
+                pass
+
+            return True, enrollment
+    except Exception:
+        pass
+
+    return False, None
+

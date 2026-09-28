@@ -13,24 +13,54 @@ from .models import EmailOTP
 logger = logging.getLogger(__name__)
 
 
-def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str]):
+def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str], raw_otp: str = None, custom_html: str = None):
+    # Prepare HTML template if OTP is provided or custom_html is given
+    html_content = custom_html
+    if not html_content and raw_otp:
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #030708; color: #F1F5F9; margin: 0; padding: 32px 16px;">
+          <div style="max-width: 480px; margin: 0 auto; background-color: #0B1116; border: 1px solid rgba(6, 182, 212, 0.3); border-radius: 14px; padding: 32px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+            <div style="text-align: center; margin-bottom: 24px;">
+              <h2 style="color: #06B6D4; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px;">Flair Academy</h2>
+              <p style="color: #94A3B8; font-size: 13px; margin: 4px 0 0;">Course Access Verification</p>
+            </div>
+            <p style="color: #E2E8F0; font-size: 15px; line-height: 1.5; margin: 0 0 16px;">Hello,</p>
+            <p style="color: #94A3B8; font-size: 14px; line-height: 1.5; margin: 0 0 20px;">Your one-time verification code to access your enrolled masterclass is:</p>
+            <div style="background: rgba(6, 182, 212, 0.1); border: 1.5px solid #06B6D4; border-radius: 10px; text-align: center; padding: 18px; margin: 0 0 24px;">
+              <span style="font-size: 34px; font-weight: 800; letter-spacing: 8px; color: #38BDF8; font-family: 'Courier New', Courier, monospace;">{raw_otp}</span>
+            </div>
+            <p style="color: #94A3B8; font-size: 13px; line-height: 1.5; margin: 0 0 20px;">This code will expire in <strong>15 minutes</strong>. If you did not request this code, you can safely ignore this email.</p>
+            <hr style="border: none; border-top: 1px solid rgba(255, 255, 255, 0.1); margin: 24px 0 16px;">
+            <p style="color: #64748B; font-size: 12px; text-align: center; margin: 0;">&copy; Flair Academy • Digital Product & Marketing Masterclass</p>
+          </div>
+        </body>
+        </html>
+        """
+
     # 1. Resend HTTPS REST API (Port 443 - Recommended for Render)
     resend_api_key = os.getenv('RESEND_API_KEY') or getattr(settings, 'RESEND_API_KEY', None)
     if resend_api_key:
         try:
-            resend_from = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or "LearnFlow Academy <onboarding@resend.dev>"
+            resend_from = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or "Flair Academy <onboarding@resend.dev>"
+            payload = {
+                "from": resend_from,
+                "to": recipient_list,
+                "subject": subject,
+                "text": message,
+            }
+            if html_content:
+                payload["html"] = html_content
+
             resp = requests.post(
                 "https://api.resend.com/emails",
                 headers={
                     "Authorization": f"Bearer {resend_api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "from": resend_from,
-                    "to": recipient_list,
-                    "subject": subject,
-                    "text": message,
-                },
+                json=payload,
                 timeout=10,
             )
             if resp.status_code in (200, 201):
@@ -45,19 +75,23 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
     brevo_api_key = os.getenv('BREVO_API_KEY') or getattr(settings, 'BREVO_API_KEY', None)
     if brevo_api_key:
         try:
-            sender_email = os.getenv('EMAIL_HOST_USER') or "noreply@learnflow.com"
+            sender_email = os.getenv('EMAIL_HOST_USER') or "noreply@flairacademy.com"
+            payload = {
+                "sender": {"name": "Flair Academy", "email": sender_email},
+                "to": [{"email": r} for r in recipient_list],
+                "subject": subject,
+                "textContent": message,
+            }
+            if html_content:
+                payload["htmlContent"] = html_content
+
             resp = requests.post(
                 "https://api.brevo.com/v3/smtp/email",
                 headers={
                     "api-key": brevo_api_key,
                     "Content-Type": "application/json",
                 },
-                json={
-                    "sender": {"name": "LearnFlow Academy", "email": sender_email},
-                    "to": [{"email": r} for r in recipient_list],
-                    "subject": subject,
-                    "textContent": message,
-                },
+                json=payload,
                 timeout=10,
             )
             if resp.status_code in (200, 201):
@@ -151,20 +185,20 @@ def create_and_send_otp(email: str) -> tuple[bool, str]:
         print(f"=======================================================\n", flush=True)
 
     # Unique subject with code prevents Gmail from collapsing new messages into old threads
-    subject = f"Your LearnFlow Access Code is {raw_otp}"
+    subject = f"Your Flair Academy Access Code is {raw_otp}"
     message = (
         f"Hello,\n\n"
         f"Your one-time verification code is: {raw_otp}\n\n"
         f"This code will expire in 15 minutes. Enter this code to access your purchased courses.\n\n"
         f"If you did not request this code, please ignore this email.\n\n"
-        f"— LearnFlow Academy"
+        f"— Flair Academy"
     )
-    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'LearnFlow Academy <noreply@learnflow.com>')
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
 
     # Dispatch email asynchronously in background thread so API response is instant (<100ms)
     email_thread = threading.Thread(
         target=_send_otp_email_worker,
-        args=(subject, message, from_email, [email]),
+        args=(subject, message, from_email, [email], raw_otp),
         daemon=True
     )
     email_thread.start()
@@ -226,3 +260,109 @@ def verify_otp_code(email: str, otp: str) -> tuple[bool, str]:
     EmailOTP.objects.filter(email=email, is_used=False).update(is_used=True)
     logger.info(f"OTP verified successfully for {email}.")
     return True, "Code verified successfully."
+
+
+_SENT_ENROLLMENT_EMAILS = set()
+
+
+def send_enrollment_confirmation_email(user, course, payment=None):
+    """
+    Dispatches an enrollment confirmation email to the user with a direct access link
+    to their enrolled course and My Learning dashboard.
+    Uses Resend HTTPS REST API (with Brevo/SMTP fallbacks) asynchronously.
+    """
+    if not user or not getattr(user, 'email', None):
+        return False, "User email is missing."
+
+    email = user.email.strip().lower()
+    course_title = getattr(course, 'title', 'Masterclass')
+    course_id = getattr(course, 'id', '1')
+    user_name = getattr(user, 'name', '') or email.split('@')[0]
+
+    # De-duplicate: Ensure only 1 welcome email is dispatched per payment / enrollment session
+    dedup_key = f"{payment.id if payment else 'no_pay'}_{user.id}_{course_id}"
+    if dedup_key in _SENT_ENROLLMENT_EMAILS:
+        return True, "Email already dispatched."
+    _SENT_ENROLLMENT_EMAILS.add(dedup_key)
+
+    frontend_url = getattr(settings, 'USER_FRONTEND_URL', 'https://e-learning-user.netlify.app')
+    if getattr(settings, 'DEBUG', False) and not os.getenv('USER_FRONTEND_URL'):
+        frontend_url = 'http://localhost:5173'
+    frontend_url = str(frontend_url).rstrip('/')
+
+    course_url = f"{frontend_url}/course/{course_id}/learn"
+    my_learning_url = f"{frontend_url}/my-learning"
+
+    amount_str = f"₹{payment.amount / 100:.0f}" if (payment and getattr(payment, 'amount', None)) else "₹499"
+    order_id_str = getattr(payment, 'razorpay_order_id', 'N/A') if payment else 'N/A'
+
+    subject = f"🎉 Access Confirmed: {course_title}"
+    message = (
+        f"Hello {user_name},\n\n"
+        f"Congratulations! Your payment of {amount_str} was successful, and your enrollment for '{course_title}' is now active.\n\n"
+        f"You have lifetime access to the masterclass. Click the link below to start learning immediately:\n"
+        f"{course_url}\n\n"
+        f"You can also access all your courses anytime at: {my_learning_url}\n\n"
+        f"Order ID: {order_id_str}\n\n"
+        f"Happy learning!\n"
+        f"— Flair Academy"
+    )
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #030708; color: #F1F5F9; margin: 0; padding: 32px 16px;">
+      <div style="max-width: 520px; margin: 0 auto; background-color: #0B1116; border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 16px; padding: 32px; box-shadow: 0 15px 40px rgba(0,0,0,0.8), 0 0 25px rgba(6,182,212,0.15);">
+        
+        <div style="text-align: center; margin-bottom: 24px;">
+          <h2 style="color: #06B6D4; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">Flair Academy</h2>
+          <span style="display: inline-block; background: rgba(6, 182, 212, 0.12); border: 1px solid rgba(6, 182, 212, 0.4); color: #38BDF8; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 10px; border-radius: 9999px; margin-top: 8px;">
+            ● Enrolled Student Confirmation
+          </span>
+        </div>
+
+        <p style="color: #F8FAFC; font-size: 16px; font-weight: 700; margin: 0 0 12px;">Welcome, {user_name}!</p>
+        
+        <p style="color: #CBD5E1; font-size: 14px; line-height: 1.6; margin: 0 0 20px;">
+          Your payment was successful and you now have <strong>full lifetime access</strong> to:
+        </p>
+
+        <div style="background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 18px; margin: 0 0 24px;">
+          <h3 style="color: #FFFFFF; font-size: 16px; font-weight: 700; margin: 0 0 6px;">{course_title}</h3>
+          <p style="color: #94A3B8; font-size: 13px; margin: 0 0 12px;">3-Hour Practical Masterclass • AI-Powered Curriculum</p>
+          <div style="border-top: 1px dashed rgba(255, 255, 255, 0.1); padding-top: 10px; font-size: 12px; color: #94A3B8;">
+            <span>Amount Paid: <strong style="color: #38BDF8;">{amount_str}</strong></span> &nbsp;•&nbsp; 
+            <span>Order ID: <span style="font-family: monospace; color: #E2E8F0;">{order_id_str}</span></span>
+          </div>
+        </div>
+
+        <div style="text-align: center; margin: 0 0 28px;">
+          <a href="{course_url}" style="display: inline-block; background: linear-gradient(135deg, #06B6D4 0%, #0EA5E9 100%); color: #030708; font-size: 15px; font-weight: 800; text-decoration: none; padding: 14px 32px; border-radius: 10px; box-shadow: 0 0 20px rgba(6, 182, 212, 0.4); letter-spacing: 0.02em;">
+            ▶ START LEARNING NOW &rarr;
+          </a>
+        </div>
+
+        <p style="color: #94A3B8; font-size: 13px; line-height: 1.5; margin: 0 0 20px; text-align: center;">
+          You can pick up right where you left off anytime at your <a href="{my_learning_url}" style="color: #38BDF8; text-decoration: underline;">My Learning Dashboard</a>.
+        </p>
+
+        <hr style="border: none; border-top: 1px solid rgba(255, 255, 255, 0.1); margin: 24px 0 16px;">
+        <p style="color: #64748B; font-size: 12px; text-align: center; margin: 0;">&copy; Flair Academy • Digital Product & Marketing Masterclass</p>
+      </div>
+    </body>
+    </html>
+    """
+
+    from_email = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
+
+    email_thread = threading.Thread(
+        target=_send_otp_email_worker,
+        args=(subject, message, from_email, [email]),
+        kwargs={"raw_otp": None, "custom_html": html_content},
+        daemon=True
+    )
+    email_thread.start()
+
+    logger.info(f"[Email] Dispatched course enrollment confirmation email to {email} for course #{course_id}")
+    return True, "Enrollment confirmation email dispatched."

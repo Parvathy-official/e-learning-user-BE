@@ -8,9 +8,9 @@ from django.utils import timezone
 
 from .models import User, Instructor, Course, Module, Lesson, FAQ, Payment, Enrollment, LessonProgress, RazorpayWebhookEvent, EmailOTP
 from .auth_utils import generate_tokens, get_authenticated_user, decode_refresh_token
-from .payment_utils import create_razorpay_order, verify_razorpay_signature, verify_razorpay_webhook_signature
+from .payment_utils import create_razorpay_order, verify_razorpay_signature, verify_razorpay_webhook_signature, check_and_fulfill_razorpay_order
 from .video_utils import generate_signed_video_url
-from .otp_utils import create_and_send_otp, verify_otp_code
+from .otp_utils import create_and_send_otp, verify_otp_code, send_enrollment_confirmation_email
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +285,11 @@ def auth_verify_otp(request):
 
     tokens = generate_tokens(user)
 
+    # Check and fulfill any pending payments for this user with Razorpay API
+    pending_payments = Payment.objects.filter(user=user, status='created')
+    for p in pending_payments:
+        check_and_fulfill_razorpay_order(p)
+
     # Return active enrolled course IDs so frontend can synchronize access immediately
     enrolled_courses = list(
         Enrollment.objects.filter(user=user, status='active').values_list('course_id', flat=True)
@@ -424,6 +429,13 @@ def course_access(request, id):
         return JsonResponse({'has_access': False, 'authenticated': False, 'enrollment': None}, status=200)
 
     enrollment = Enrollment.objects.filter(user=user, course=course, status='active').first()
+    if not enrollment:
+        # Check if user has a pending paid order on Razorpay for this course
+        pending_payments = Payment.objects.filter(user=user, course=course, status='created')
+        for p in pending_payments:
+            check_and_fulfill_razorpay_order(p)
+        enrollment = Enrollment.objects.filter(user=user, course=course, status='active').first()
+
     if enrollment:
         return JsonResponse({
             'has_access': True,
@@ -630,6 +642,11 @@ def my_enrollments(request):
     user = get_authenticated_user(request)
     if not user:
         return JsonResponse({'error': 'Unauthenticated'}, status=401)
+
+    # Check and fulfill any pending payments for this user with Razorpay API
+    pending_payments = Payment.objects.filter(user=user, status='created')
+    for p in pending_payments:
+        check_and_fulfill_razorpay_order(p)
 
     enrollments = Enrollment.objects.filter(user=user).select_related(
         'course',
@@ -860,6 +877,9 @@ def payment_verify(request):
             }
         )
 
+    # Dispatch course access confirmation email
+    send_enrollment_confirmation_email(target_user, payment.course, payment=payment)
+
     logger.info(f"[Payment] Signature verified successfully. Payment #{payment.id} marked paid. Enrollment #{enrollment.id} active (created={created}) for user={target_user.email}, course={payment.course.title}")
 
     tokens = generate_tokens(target_user)
@@ -893,6 +913,11 @@ def payment_status(request, order_id):
     # Privacy: If a different user is logged in, do not expose other users' payment records
     if user and payment.user_id != user.id:
         return JsonResponse({'error': 'Order not found'}, status=404)
+
+    # If payment is not yet marked paid, verify directly with Razorpay API
+    if payment.status != 'paid':
+        check_and_fulfill_razorpay_order(payment)
+        payment.refresh_from_db()
 
     res = {
         'order_id': payment.razorpay_order_id,
@@ -996,6 +1021,9 @@ def payment_webhook(request):
                         if not enrollment.payment:
                             enrollment.payment = payment
                             enrollment.save(update_fields=['payment'])
+
+                        # Dispatch course access confirmation email
+                        send_enrollment_confirmation_email(payment.user, payment.course, payment=payment)
 
         elif event_type == 'payment.failed':
             payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
