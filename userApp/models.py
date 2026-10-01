@@ -148,6 +148,7 @@ class Module(models.Model):
 class Lesson(models.Model):
     module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name='lessons')
     title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default='')
     duration = models.CharField(max_length=50, default='15:00')
     duration_seconds = models.PositiveIntegerField(default=900)
     video_url = models.URLField(blank=True, null=True, help_text="Video source file URL or key")

@@ -98,6 +98,7 @@ def serialize_lesson_admin(lesson):
         'id': lesson.id,
         'module_id': lesson.module_id,
         'title': lesson.title,
+        'description': lesson.description or '',
         'duration': lesson.duration,
         'duration_seconds': lesson.duration_seconds,
         'video_url': lesson.video_url,
@@ -620,6 +621,7 @@ def admin_module_lessons(request, module_id):
             lesson = Lesson.objects.create(
                 module=module,
                 title=title,
+                description=str(data.get('description', '') or '').strip(),
                 duration=duration,
                 duration_seconds=int(duration_seconds),
                 video_url=data.get('video_url') or None,
@@ -650,6 +652,8 @@ def admin_lesson_detail(request, lesson_id):
 
         if 'title' in data:
             lesson.title = data['title'].strip()
+        if 'description' in data:
+            lesson.description = str(data.get('description', '') or '').strip()
         if 'duration' in data:
             lesson.duration = data['duration'].strip()
         if 'duration_seconds' in data:

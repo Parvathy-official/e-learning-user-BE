@@ -761,4 +761,23 @@ class GuestCheckoutAndPasswordlessOTPSecurityTests(TestCase):
         # Both records must now be marked is_used=True
         self.assertEqual(EmailOTP.objects.filter(email=email, is_used=False).count(), 0)
 
+    def test_lesson_description_in_course_detail(self):
+        # Set description on preview lesson
+        self.lesson_a_preview.description = "Learn the basics of digital products and unit economics."
+        self.lesson_a_preview.save()
+
+        # Fetch course details
+        res = self.client.get(f'/api/courses/{self.course_a.id}/')
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        lessons = data['modules'][0]['lessons']
+        
+        # Lesson A preview has description
+        lesson1 = next(l for l in lessons if str(l['id']) == str(self.lesson_a_preview.id))
+        self.assertEqual(lesson1['description'], "Learn the basics of digital products and unit economics.")
+
+        # Lesson A protected has empty default description
+        lesson2 = next(l for l in lessons if str(l['id']) == str(self.lesson_a_protected.id))
+        self.assertEqual(lesson2['description'], "")
+
 

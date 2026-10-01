@@ -380,6 +380,7 @@ def course_detail(request, id):
             lessons_data.append({
                 'id': str(lesson.id),
                 'title': lesson.title,
+                'description': lesson.description or '',
                 'duration': lesson.duration,
                 'duration_seconds': lesson.duration_seconds,
                 'is_preview': lesson.is_preview,

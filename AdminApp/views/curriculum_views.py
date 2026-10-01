@@ -160,10 +160,12 @@ def admin_module_lessons(request, module_id):
     duration_seconds = int(data.get('duration_seconds', 900))
     video_url = data.get('video_url', '').strip()
     is_preview = bool(data.get('is_preview', False))
+    description = str(data.get('description', '') or '').strip()
 
     lesson = Lesson.objects.create(
         module=module,
         title=title,
+        description=description,
         duration=duration,
         duration_seconds=duration_seconds,
         video_url=video_url or None,
@@ -198,6 +200,8 @@ def admin_lesson_detail(request, lesson_id):
                 return error_response('Lesson title cannot be empty', status=400)
             lesson.title = title
 
+        if 'description' in data:
+            lesson.description = str(data.get('description', '') or '').strip()
         if 'duration' in data:
             lesson.duration = data.get('duration', lesson.duration)
         if 'duration_seconds' in data:

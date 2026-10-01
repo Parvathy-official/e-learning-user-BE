@@ -148,7 +148,7 @@ JWT_REFRESH_EXPIRATION_DAYS = 7
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Email Configuration (Passwordless OTP)
+# Email Configuration (SMTP)
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend' if DEBUG else 'django.core.mail.backends.smtp.EmailBackend')
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
@@ -158,10 +158,6 @@ EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '15'))
 
-# Resend HTTPS REST API (Port 443 — Recommended for Render)
-RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
-RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
-BREVO_API_KEY = os.getenv('BREVO_API_KEY', '')
 
 
 

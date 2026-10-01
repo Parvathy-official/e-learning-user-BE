@@ -131,7 +131,7 @@ class AdminAppTestCase(TestCase):
             data=json.dumps({'email': 'superadmin@learnflow.com', 'password': 'WrongPassword'}),
             content_type='application/json'
         )
-        self.assertEqual(response.status_code, )
+        self.assertEqual(response.status_code, 401)
 
     def test_regular_student_cannot_login_as_admin(self):
         response = self.client.post(
@@ -266,11 +266,12 @@ class AdminAppTestCase(TestCase):
         self.assertEqual(m_res.status_code, 201)
         mod_id = m_res.json()['id']
 
-        # Create lesson
+        # Create lesson with description
         l_res = self.client.post(
             f'/api/admin/modules/{mod_id}/lessons/',
             data=json.dumps({
                 'title': 'Lesson 2.1: Meta Pixel Tracking',
+                'description': 'Comprehensive overview of server-side pixel tracking and CAPI integration.',
                 'duration': '20:00',
                 'duration_seconds': 1200,
                 'video_url': 'https://example.com/pixel.mp4',
@@ -281,6 +282,37 @@ class AdminAppTestCase(TestCase):
         )
         self.assertEqual(l_res.status_code, 201)
         self.assertEqual(l_res.json()['title'], 'Lesson 2.1: Meta Pixel Tracking')
+        self.assertEqual(l_res.json()['description'], 'Comprehensive overview of server-side pixel tracking and CAPI integration.')
+
+    def test_update_lesson_description(self):
+        # Update existing lesson description
+        up_res = self.client.put(
+            f'/api/admin/lessons/{self.lesson.id}/',
+            data=json.dumps({
+                'title': self.lesson.title,
+                'description': 'Updated detailed syllabus description for Lesson 1.',
+            }),
+            content_type='application/json',
+            **self.admin_auth_headers
+        )
+        self.assertEqual(up_res.status_code, 200)
+        self.assertEqual(up_res.json()['description'], 'Updated detailed syllabus description for Lesson 1.')
+
+        self.lesson.refresh_from_db()
+        self.assertEqual(self.lesson.description, 'Updated detailed syllabus description for Lesson 1.')
+
+        # Empty description test
+        empty_res = self.client.put(
+            f'/api/admin/lessons/{self.lesson.id}/',
+            data=json.dumps({
+                'title': self.lesson.title,
+                'description': '',
+            }),
+            content_type='application/json',
+            **self.admin_auth_headers
+        )
+        self.assertEqual(empty_res.status_code, 200)
+        self.assertEqual(empty_res.json()['description'], '')
 
     def test_reorder_modules(self):
         mod2 = Module.objects.create(course=self.course, title='Module 2', order=2)

@@ -60,6 +60,7 @@ def serialize_lesson_admin(lesson):
         'id': lesson.id,
         'module_id': lesson.module_id,
         'title': lesson.title,
+        'description': lesson.description or '',
         'duration': lesson.duration or '15:00',
         'duration_seconds': lesson.duration_seconds or 900,
         'video_url': lesson.video_url or '',

@@ -3,7 +3,6 @@ import hashlib
 import secrets
 import threading
 import logging
-import requests
 from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
@@ -40,80 +39,20 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
         </html>
         """
 
-    # 1. Resend HTTPS REST API (Port 443 - Recommended for Render)
-    resend_api_key = os.getenv('RESEND_API_KEY') or getattr(settings, 'RESEND_API_KEY', None)
-    if resend_api_key:
-        try:
-            resend_from = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or "Flair Academy <onboarding@resend.dev>"
-            payload = {
-                "from": resend_from,
-                "to": recipient_list,
-                "subject": subject,
-                "text": message,
-            }
-            if html_content:
-                payload["html"] = html_content
-
-            resp = requests.post(
-                "https://api.resend.com/emails",
-                headers={
-                    "Authorization": f"Bearer {resend_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=10,
-            )
-            if resp.status_code in (200, 201):
-                logger.info(f"Successfully sent OTP via Resend API to {recipient_list}")
-                return
-            else:
-                logger.error(f"Resend API error ({resp.status_code}): {resp.text}")
-        except Exception as e:
-            logger.error(f"Resend HTTPS dispatch failed: {e}")
-
-    # 2. Brevo HTTPS REST API (Port 443)
-    brevo_api_key = os.getenv('BREVO_API_KEY') or getattr(settings, 'BREVO_API_KEY', None)
-    if brevo_api_key:
-        try:
-            sender_email = os.getenv('EMAIL_HOST_USER') or "noreply@flairacademy.com"
-            payload = {
-                "sender": {"name": "Flair Academy", "email": sender_email},
-                "to": [{"email": r} for r in recipient_list],
-                "subject": subject,
-                "textContent": message,
-            }
-            if html_content:
-                payload["htmlContent"] = html_content
-
-            resp = requests.post(
-                "https://api.brevo.com/v3/smtp/email",
-                headers={
-                    "api-key": brevo_api_key,
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=10,
-            )
-            if resp.status_code in (200, 201):
-                logger.info(f"Successfully sent OTP via Brevo API to {recipient_list}")
-                return
-            else:
-                logger.error(f"Brevo API error ({resp.status_code}): {resp.text}")
-        except Exception as e:
-            logger.error(f"Brevo HTTPS dispatch failed: {e}")
-
-    # 3. Fallback to standard Django send_mail (SMTP/Console)
+    # Standard Django send_mail over SMTP (with HTML and plain text support)
+    sender = from_email or getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'EMAIL_HOST_USER', 'noreply@flairacademy.com')
     try:
         send_mail(
             subject=subject,
             message=message,
-            from_email=from_email,
+            from_email=sender,
             recipient_list=recipient_list,
+            html_message=html_content,
             fail_silently=False
         )
-        logger.info(f"Successfully sent OTP via standard send_mail to {recipient_list}")
+        logger.info(f"Successfully sent email via SMTP to {recipient_list}")
     except Exception as e:
-        logger.error(f"Failed to send OTP email to {recipient_list}: {e}")
+        logger.error(f"Failed to send email via SMTP to {recipient_list}: {e}")
 
 
 def generate_secure_otp() -> str:
@@ -269,7 +208,7 @@ def send_enrollment_confirmation_email(user, course, payment=None):
     """
     Dispatches an enrollment confirmation email to the user with a direct access link
     to their enrolled course and My Learning dashboard.
-    Uses Resend HTTPS REST API (with Brevo/SMTP fallbacks) asynchronously.
+    Uses standard Django SMTP asynchronously.
     """
     if not user or not getattr(user, 'email', None):
         return False, "User email is missing."
@@ -354,7 +293,7 @@ def send_enrollment_confirmation_email(user, course, payment=None):
     </html>
     """
 
-    from_email = os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'RESEND_FROM_EMAIL', None) or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
 
     email_thread = threading.Thread(
         target=_send_otp_email_worker,

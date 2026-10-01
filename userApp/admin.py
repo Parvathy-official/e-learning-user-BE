@@ -46,9 +46,10 @@ class CourseAdmin(admin.ModelAdmin):
     inlines = [ModuleInline, FAQInline]
 
 
-class LessonInline(admin.TabularInline):
+class LessonInline(admin.StackedInline):
     model = Lesson
-    extra = 1
+    extra = 0
+    fields = ('title', 'description', 'duration', 'duration_seconds', 'video_url', 'is_preview', 'order')
 
 
 @admin.register(Module)
@@ -63,7 +64,8 @@ class ModuleAdmin(admin.ModelAdmin):
 class LessonAdmin(admin.ModelAdmin):
     list_display = ('id', 'module', 'title', 'duration', 'is_preview', 'order')
     list_filter = ('module__course', 'is_preview')
-    search_fields = ('title', 'module__title')
+    search_fields = ('title', 'module__title', 'description')
+    fields = ('module', 'title', 'description', 'duration', 'duration_seconds', 'video_url', 'is_preview', 'order')
 
 
 @admin.register(FAQ)
