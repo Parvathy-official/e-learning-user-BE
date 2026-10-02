@@ -117,11 +117,12 @@ def create_and_send_otp(email: str) -> tuple[bool, str]:
         is_used=False
     )
 
-    # In local development (DEBUG=True), print the OTP directly to the terminal for fast testing
+    # In local development (DEBUG=True), log the OTP securely without crashing on closed stdout/stderr streams
     if getattr(settings, 'DEBUG', False):
-        print(f"\n=======================================================", flush=True)
-        print(f"🔑 [LOCAL DEV OTP] Email: {email} | OTP: {raw_otp}", flush=True)
-        print(f"=======================================================\n", flush=True)
+        try:
+            logger.info(f"🔑 [LOCAL DEV OTP] Email: {email} | OTP: {raw_otp}")
+        except Exception:
+            pass
 
     # Unique subject with code prevents Gmail from collapsing new messages into old threads
     subject = f"Your Flair Academy Access Code is {raw_otp}"

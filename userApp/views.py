@@ -239,16 +239,20 @@ def auth_request_otp(request):
     if not email or '@' not in email or '.' not in email:
         return JsonResponse({'error': 'Please enter a valid email address'}, status=400)
 
-    success, msg = create_and_send_otp(email)
-    if not success:
-        status_code = 429 if 'wait' in msg.lower() else 500
-        return JsonResponse({'error': msg}, status=status_code)
+    try:
+        success, msg = create_and_send_otp(email)
+        if not success:
+            status_code = 429 if 'wait' in msg.lower() else 500
+            return JsonResponse({'error': msg}, status=status_code)
 
-    return JsonResponse({
-        'success': True,
-        'message': msg,
-        'email': email,
-    }, status=200)
+        return JsonResponse({
+            'success': True,
+            'message': msg,
+            'email': email,
+        }, status=200)
+    except Exception as e:
+        logger.error(f"Error in auth_request_otp for {email}: {e}", exc_info=True)
+        return JsonResponse({'error': 'Failed to send verification code. Please try again.'}, status=500)
 
 
 @csrf_exempt
@@ -270,46 +274,50 @@ def auth_verify_otp(request):
     if not email or not otp:
         return JsonResponse({'error': 'Email and verification code are required'}, status=400)
 
-    success, msg = verify_otp_code(email, otp)
-    if not success:
-        return JsonResponse({'error': msg}, status=400)
+    try:
+        success, msg = verify_otp_code(email, otp)
+        if not success:
+            return JsonResponse({'error': msg}, status=400)
 
-    # Find or create user
-    user = User.objects.filter(email__iexact=email).first()
-    if not user:
-        name = email.split('@')[0].capitalize()
-        user = User.objects.create_user(email=email, name=name)
+        # Find or create user
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            name = email.split('@')[0].capitalize()
+            user = User.objects.create_user(email=email, name=name)
 
-    if not user.is_active:
-        return JsonResponse({'error': 'Account is disabled'}, status=403)
+        if not user.is_active:
+            return JsonResponse({'error': 'Account is disabled'}, status=403)
 
-    tokens = generate_tokens(user)
+        tokens = generate_tokens(user)
 
-    # Check and fulfill any pending payments for this user with Razorpay API
-    pending_payments = Payment.objects.filter(user=user, status='created')
-    for p in pending_payments:
-        check_and_fulfill_razorpay_order(p)
+        # Check and fulfill any pending payments for this user with Razorpay API
+        pending_payments = Payment.objects.filter(user=user, status='created')
+        for p in pending_payments:
+            check_and_fulfill_razorpay_order(p)
 
-    # Return active enrolled course IDs so frontend can synchronize access immediately
-    enrolled_courses = list(
-        Enrollment.objects.filter(user=user, status='active').values_list('course_id', flat=True)
-    )
+        # Return active enrolled course IDs so frontend can synchronize access immediately
+        enrolled_courses = list(
+            Enrollment.objects.filter(user=user, status='active').values_list('course_id', flat=True)
+        )
 
-    return JsonResponse({
-        'success': True,
-        'message': 'Successfully verified and logged in',
-        'user': {
-            'id': user.id,
-            'name': user.name,
-            'email': user.email,
-            'avatar': user.avatar,
-            'is_staff': user.is_staff,
-            'is_superuser': user.is_superuser,
-        },
-        'enrolled_course_ids': [str(cid) for cid in enrolled_courses],
-        'access': tokens['access'],
-        'refresh': tokens['refresh'],
-    }, status=200)
+        return JsonResponse({
+            'success': True,
+            'message': 'Successfully verified and logged in',
+            'user': {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'avatar': user.avatar,
+                'is_staff': user.is_staff,
+                'is_superuser': user.is_superuser,
+            },
+            'enrolled_course_ids': [str(cid) for cid in enrolled_courses],
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+        }, status=200)
+    except Exception as e:
+        logger.error(f"Error in auth_verify_otp for {email}: {e}", exc_info=True)
+        return JsonResponse({'error': 'Failed to verify code. Please try again.'}, status=500)
 
 
 
