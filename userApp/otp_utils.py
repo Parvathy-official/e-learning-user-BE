@@ -1,7 +1,6 @@
 import os
 import hashlib
 import secrets
-import threading
 import logging
 from datetime import timedelta
 from django.utils import timezone
@@ -9,54 +8,14 @@ from django.conf import settings
 from django.core.mail import send_mail
 from .models import EmailOTP
 
-import requests
-
 logger = logging.getLogger(__name__)
 
 
-def _send_via_resend(api_key: str, from_email: str, recipient_list: list[str], subject: str, message: str, html_content: str = None) -> bool:
+def _send_otp_email_smtp(subject: str, message: str, from_email: str, recipient_list: list[str], raw_otp: str = None, custom_html: str = None) -> tuple[bool, str]:
     """
-    Sends an email using the Resend REST API (HTTPS port 443).
-    Reliable in cloud environments (Render, AWS, etc.) where outbound SMTP ports may be blocked.
+    Sends email via Django SMTP email backend (Gmail SMTP).
+    Returns (success: bool, error_msg: str).
     """
-    try:
-        sender = from_email or os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
-        # If using test domain, default sender to onboarding@resend.dev
-        if not sender or '@' not in sender:
-            sender = 'Flair Academy <onboarding@resend.dev>'
-
-        headers = {
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type': 'application/json',
-        }
-        payload = {
-            'from': sender,
-            'to': recipient_list,
-            'subject': subject,
-            'text': message,
-        }
-        if html_content:
-            payload['html'] = html_content
-
-        resp = requests.post(
-            'https://api.resend.com/emails',
-            headers=headers,
-            json=payload,
-            timeout=10
-        )
-        if resp.status_code in [200, 201]:
-            logger.info(f"Successfully sent email via Resend API to {recipient_list}")
-            return True
-        else:
-            logger.error(f"Resend API error ({resp.status_code}): {resp.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Failed to send email via Resend API to {recipient_list}: {e}")
-        return False
-
-
-def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str], raw_otp: str = None, custom_html: str = None):
-    # Prepare HTML template if OTP is provided or custom_html is given
     html_content = custom_html
     if not html_content and raw_otp:
         html_content = f"""
@@ -82,16 +41,9 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
         </html>
         """
 
-    # 1. Try Resend REST API if RESEND_API_KEY is present
-    resend_api_key = os.getenv('RESEND_API_KEY', '').strip() or getattr(settings, 'RESEND_API_KEY', '').strip()
-    if resend_api_key:
-        resend_from = os.getenv('RESEND_FROM_EMAIL') or from_email or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
-        if _send_via_resend(resend_api_key, resend_from, recipient_list, subject, message, html_content):
-            return
-
-    # 2. Standard Django send_mail over SMTP or configured EMAIL_BACKEND
     sender = from_email or getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'EMAIL_HOST_USER', 'noreply@flairacademy.com')
     try:
+        logger.info("OTP FLOW: email send started")
         send_mail(
             subject=subject,
             message=message,
@@ -100,9 +52,11 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
             html_message=html_content,
             fail_silently=False
         )
-        logger.info(f"Successfully sent email via Django mail backend to {recipient_list}")
+        logger.info("OTP FLOW: email send completed")
+        return True, ""
     except Exception as e:
-        logger.error(f"Failed to send email via Django mail backend to {recipient_list}: {e}")
+        logger.error(f"OTP FLOW: email send failed: {type(e).__name__} - {e}", exc_info=True)
+        return False, f"{type(e).__name__}: {str(e)}"
 
 
 def generate_secure_otp() -> str:
@@ -141,9 +95,11 @@ def hash_otp(email: str, otp: str) -> str:
 
 def create_and_send_otp(email: str) -> tuple[bool, str]:
     """
-    Rate-limits, generates, stores hashed OTP, and sends email to user in background.
-    Returns (success: bool, message: str).
+    Rate-limits, generates, stores hashed OTP, sends email via Gmail SMTP,
+    and returns (success: bool, message: str).
+    If email delivery fails, cleans up the un-sent OTP record so rate limiting does not lock the user out.
     """
+    logger.info("OTP FLOW: entered create_and_send_otp")
     email = email.strip().lower()
     now = timezone.now()
 
@@ -153,26 +109,23 @@ def create_and_send_otp(email: str) -> tuple[bool, str]:
         created_at__gte=now - timedelta(seconds=45)
     ).first()
     if recent_otp:
+        logger.info("OTP FLOW: rate limit hit")
         return False, "A verification code was already sent recently. Please wait 45 seconds before requesting a new one."
 
     raw_otp = generate_secure_otp()
+    logger.info("OTP FLOW: OTP generated")
+
     hashed = hash_otp(email, raw_otp)
     expires_at = now + timedelta(minutes=15)
 
-    EmailOTP.objects.create(
+    otp_record = EmailOTP.objects.create(
         email=email,
         otp_hash=hashed,
         expires_at=expires_at,
         attempts=0,
         is_used=False
     )
-
-    # In local development (DEBUG=True), log the OTP securely without crashing on closed stdout/stderr streams
-    if getattr(settings, 'DEBUG', False):
-        try:
-            logger.info(f"🔑 [LOCAL DEV OTP] Email: {email} | OTP: {raw_otp}")
-        except Exception:
-            pass
+    logger.info("OTP FLOW: database record created")
 
     # Unique subject with code prevents Gmail from collapsing new messages into old threads
     subject = f"Your Flair Academy Access Code is {raw_otp}"
@@ -184,14 +137,22 @@ def create_and_send_otp(email: str) -> tuple[bool, str]:
         f"— Flair Academy"
     )
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
+    logger.info("OTP FLOW: email message constructed")
 
-    # Dispatch email asynchronously in background thread so API response is instant (<100ms)
-    email_thread = threading.Thread(
-        target=_send_otp_email_worker,
-        args=(subject, message, from_email, [email], raw_otp),
-        daemon=True
+    # Send verification email via configured SMTP backend
+    success, err_msg = _send_otp_email_smtp(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=[email],
+        raw_otp=raw_otp
     )
-    email_thread.start()
+
+    if not success:
+        # If email fails, immediately delete the created OTP record so user can retry without being locked out
+        otp_record.delete()
+        logger.warning(f"OTP FLOW: OTP database record removed due to email dispatch failure for {email}")
+        return False, "Failed to send verification code. Please check your email address or try again in a few moments."
 
     return True, "Verification code sent to your email."
 
@@ -346,8 +307,9 @@ def send_enrollment_confirmation_email(user, course, payment=None):
 
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <noreply@flairacademy.com>')
 
+    import threading
     email_thread = threading.Thread(
-        target=_send_otp_email_worker,
+        target=_send_otp_email_smtp,
         args=(subject, message, from_email, [email]),
         kwargs={"raw_otp": None, "custom_html": html_content},
         daemon=True
