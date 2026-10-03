@@ -242,7 +242,7 @@ def auth_request_otp(request):
     try:
         success, msg = create_and_send_otp(email)
         if not success:
-            status_code = 429 if 'wait' in msg.lower() else 500
+            status_code = 429 if 'wait' in msg.lower() or 'already sent' in msg.lower() else 400
             return JsonResponse({'error': msg}, status=status_code)
 
         return JsonResponse({
@@ -252,7 +252,7 @@ def auth_request_otp(request):
         }, status=200)
     except Exception as e:
         logger.error(f"Error in auth_request_otp for {email}: {e}", exc_info=True)
-        return JsonResponse({'error': 'Failed to send verification code. Please try again.'}, status=500)
+        return JsonResponse({'error': 'Unable to send verification code. Please try again in a moment.'}, status=500)
 
 
 @csrf_exempt
@@ -291,9 +291,12 @@ def auth_verify_otp(request):
         tokens = generate_tokens(user)
 
         # Check and fulfill any pending payments for this user with Razorpay API
-        pending_payments = Payment.objects.filter(user=user, status='created')
-        for p in pending_payments:
-            check_and_fulfill_razorpay_order(p)
+        try:
+            pending_payments = Payment.objects.filter(user=user, status='created')
+            for p in pending_payments:
+                check_and_fulfill_razorpay_order(p)
+        except Exception as pay_err:
+            logger.warning(f"Warning checking pending payments for {email}: {pay_err}")
 
         # Return active enrolled course IDs so frontend can synchronize access immediately
         enrolled_courses = list(
@@ -317,7 +320,7 @@ def auth_verify_otp(request):
         }, status=200)
     except Exception as e:
         logger.error(f"Error in auth_verify_otp for {email}: {e}", exc_info=True)
-        return JsonResponse({'error': 'Failed to verify code. Please try again.'}, status=500)
+        return JsonResponse({'error': 'Unable to verify code. Please try again.'}, status=500)
 
 
 

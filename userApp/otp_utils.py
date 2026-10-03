@@ -9,7 +9,50 @@ from django.conf import settings
 from django.core.mail import send_mail
 from .models import EmailOTP
 
+import requests
+
 logger = logging.getLogger(__name__)
+
+
+def _send_via_resend(api_key: str, from_email: str, recipient_list: list[str], subject: str, message: str, html_content: str = None) -> bool:
+    """
+    Sends an email using the Resend REST API (HTTPS port 443).
+    Reliable in cloud environments (Render, AWS, etc.) where outbound SMTP ports may be blocked.
+    """
+    try:
+        sender = from_email or os.getenv('RESEND_FROM_EMAIL') or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
+        # If using test domain, default sender to onboarding@resend.dev
+        if not sender or '@' not in sender:
+            sender = 'Flair Academy <onboarding@resend.dev>'
+
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'from': sender,
+            'to': recipient_list,
+            'subject': subject,
+            'text': message,
+        }
+        if html_content:
+            payload['html'] = html_content
+
+        resp = requests.post(
+            'https://api.resend.com/emails',
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        if resp.status_code in [200, 201]:
+            logger.info(f"Successfully sent email via Resend API to {recipient_list}")
+            return True
+        else:
+            logger.error(f"Resend API error ({resp.status_code}): {resp.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to send email via Resend API to {recipient_list}: {e}")
+        return False
 
 
 def _send_otp_email_worker(subject: str, message: str, from_email: str, recipient_list: list[str], raw_otp: str = None, custom_html: str = None):
@@ -39,7 +82,14 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
         </html>
         """
 
-    # Standard Django send_mail over SMTP (with HTML and plain text support)
+    # 1. Try Resend REST API if RESEND_API_KEY is present
+    resend_api_key = os.getenv('RESEND_API_KEY', '').strip() or getattr(settings, 'RESEND_API_KEY', '').strip()
+    if resend_api_key:
+        resend_from = os.getenv('RESEND_FROM_EMAIL') or from_email or getattr(settings, 'DEFAULT_FROM_EMAIL', 'Flair Academy <onboarding@resend.dev>')
+        if _send_via_resend(resend_api_key, resend_from, recipient_list, subject, message, html_content):
+            return
+
+    # 2. Standard Django send_mail over SMTP or configured EMAIL_BACKEND
     sender = from_email or getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'EMAIL_HOST_USER', 'noreply@flairacademy.com')
     try:
         send_mail(
@@ -50,9 +100,9 @@ def _send_otp_email_worker(subject: str, message: str, from_email: str, recipien
             html_message=html_content,
             fail_silently=False
         )
-        logger.info(f"Successfully sent email via SMTP to {recipient_list}")
+        logger.info(f"Successfully sent email via Django mail backend to {recipient_list}")
     except Exception as e:
-        logger.error(f"Failed to send email via SMTP to {recipient_list}: {e}")
+        logger.error(f"Failed to send email via Django mail backend to {recipient_list}: {e}")
 
 
 def generate_secure_otp() -> str:
