@@ -139,6 +139,19 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
+    'https://jasimdigital.online',
+    'http://jasimdigital.online',
+    'https://api.jasimdigital.online',
+    'http://api.jasimdigital.online',
+    'https://e-learning-user.netlify.app',
+    'https://e-learningadmin-fe.netlify.app',
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    'https://jasimdigital.online',
+    'http://jasimdigital.online',
+    'https://api.jasimdigital.online',
+    'http://api.jasimdigital.online',
     'https://e-learning-user.netlify.app',
     'https://e-learningadmin-fe.netlify.app',
 ]
