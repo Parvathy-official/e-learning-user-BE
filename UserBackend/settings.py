@@ -131,6 +131,8 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Frontend URLs
 USER_FRONTEND_URL = os.getenv('USER_FRONTEND_URL', 'https://jasimdigital.online')
+if not USER_FRONTEND_URL or 'e-learning-user.netlify.app' in USER_FRONTEND_URL:
+    USER_FRONTEND_URL = 'https://jasimdigital.online'
 ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL', 'https://e-learningadmin-fe.netlify.app')
 
 # CORS configuration

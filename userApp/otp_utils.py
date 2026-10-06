@@ -240,6 +240,8 @@ def send_enrollment_confirmation_email(user, course, payment=None):
     if getattr(settings, 'DEBUG', False) and not os.getenv('USER_FRONTEND_URL'):
         frontend_url = 'http://localhost:5173'
     frontend_url = str(frontend_url).rstrip('/')
+    if 'e-learning-user.netlify.app' in frontend_url or not frontend_url:
+        frontend_url = 'https://jasimdigital.online'
 
     course_url = f"{frontend_url}/course/{course_id}/learn"
     my_learning_url = f"{frontend_url}/my-learning"
