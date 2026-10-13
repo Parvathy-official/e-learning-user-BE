@@ -47,7 +47,7 @@ class Command(BaseCommand):
                     'instructor': instructor,
                     'category': 'Digital Products & AI',
                     'price': 499.00,
-                    'original_price': 2499.00,
+                    'original_price': 1999.00,
                     'duration': '3 Hours',
                     'level': 'Beginner-Friendly',
                     'language': 'English',
