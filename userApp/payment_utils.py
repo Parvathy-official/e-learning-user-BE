@@ -150,7 +150,7 @@ def check_and_fulfill_razorpay_order(payment):
     from .models import Enrollment
 
     if payment.status == 'paid':
-        enrollment = Enrollment.objects.filter(user=payment.user, course=payment.course, status='active').first()
+        enrollment = Enrollment.objects.filter(user=payment.user, course=payment.course, status__in=['active', 'completed']).first()
         return True, enrollment
 
     client = get_razorpay_client()

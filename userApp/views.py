@@ -299,9 +299,9 @@ def auth_verify_otp(request):
         except Exception as pay_err:
             logger.warning(f"Warning checking pending payments for {email}: {pay_err}")
 
-        # Return active enrolled course IDs so frontend can synchronize access immediately
+        # Return active or completed enrolled course IDs so frontend can synchronize access immediately
         enrolled_courses = list(
-            Enrollment.objects.filter(user=user, status='active').values_list('course_id', flat=True)
+            Enrollment.objects.filter(user=user, status__in=['active', 'completed']).values_list('course_id', flat=True)
         )
 
         return JsonResponse({
@@ -377,7 +377,7 @@ def course_detail(request, id):
     completed_lesson_ids = set()
 
     if user:
-        is_enrolled = Enrollment.objects.filter(user=user, course=course, status='active').exists()
+        is_enrolled = Enrollment.objects.filter(user=user, course=course, status__in=['active', 'completed']).exists()
         completed_lesson_ids = set(
             LessonProgress.objects.filter(user=user, lesson__module__course=course, completed=True)
             .values_list('lesson_id', flat=True)
@@ -441,13 +441,13 @@ def course_access(request, id):
     if not user:
         return JsonResponse({'has_access': False, 'authenticated': False, 'enrollment': None}, status=200)
 
-    enrollment = Enrollment.objects.filter(user=user, course=course, status='active').first()
+    enrollment = Enrollment.objects.filter(user=user, course=course, status__in=['active', 'completed']).first()
     if not enrollment:
         # Check if user has a pending paid order on Razorpay for this course
         pending_payments = Payment.objects.filter(user=user, course=course, status='created')
         for p in pending_payments:
             check_and_fulfill_razorpay_order(p)
-        enrollment = Enrollment.objects.filter(user=user, course=course, status='active').first()
+        enrollment = Enrollment.objects.filter(user=user, course=course, status__in=['active', 'completed']).first()
 
     if enrollment:
         return JsonResponse({
@@ -456,6 +456,7 @@ def course_access(request, id):
             'enrollment': {
                 'id': str(enrollment.id),
                 'course_id': str(enrollment.course_id),
+                'status': enrollment.status,
                 'progress_percentage': enrollment.progress_percentage,
                 'last_watched_lesson_id': str(enrollment.last_watched_lesson_id) if enrollment.last_watched_lesson_id else None,
                 'last_position_seconds': enrollment.last_watched_position,
@@ -494,8 +495,8 @@ def lesson_video(request, course_id, lesson_id):
     if not user:
         return JsonResponse({'error': 'Authentication required to watch this lesson'}, status=401)
 
-    # 3. Check enrollment
-    has_enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status='active').exists()
+    # 3. Check enrollment (active and completed enrollments both have access)
+    has_enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status__in=['active', 'completed']).exists()
     if not has_enrollment:
         return JsonResponse({'error': 'Enrollment required. You have not purchased this course.'}, status=403)
 
@@ -520,7 +521,7 @@ def lesson_progress(request, course_id, lesson_id):
     if not lesson:
         return JsonResponse({'error': 'Lesson not found in this course'}, status=404)
 
-    enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status='active').first()
+    enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status__in=['active', 'completed']).first()
     if not enrollment:
         return JsonResponse({'error': 'Enrollment required'}, status=403)
 
@@ -569,7 +570,7 @@ def lesson_progress(request, course_id, lesson_id):
     enrollment.progress_percentage = overall_pct
     enrollment.last_watched_lesson = lesson
     enrollment.last_watched_position = watched_seconds
-    if overall_pct == 100:
+    if total_lessons > 0 and completed_lessons_count >= total_lessons:
         enrollment.status = 'completed'
     enrollment.save()
 
@@ -601,7 +602,7 @@ def lesson_complete(request, course_id, lesson_id):
     if not lesson:
         return JsonResponse({'error': 'Lesson not found in this course'}, status=404)
 
-    enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status='active').first()
+    enrollment = Enrollment.objects.filter(user=user, course_id=course_id, status__in=['active', 'completed']).first()
     if not enrollment:
         return JsonResponse({'error': 'Enrollment required'}, status=403)
 
@@ -633,7 +634,7 @@ def lesson_complete(request, course_id, lesson_id):
 
     enrollment.progress_percentage = overall_pct
     enrollment.last_watched_lesson = lesson
-    if overall_pct == 100:
+    if total_lessons > 0 and completed_lessons_count >= total_lessons:
         enrollment.status = 'completed'
     enrollment.save()
 
@@ -786,7 +787,7 @@ def payment_create_order(request):
     if Enrollment.objects.filter(
         user=user,
         course=course,
-        status='active'
+        status__in=['active', 'completed']
     ).exists():
         return JsonResponse(
             {'error': 'You are already enrolled in this course'},
@@ -920,6 +921,10 @@ def payment_status(request, order_id):
 
     payment = Payment.objects.filter(razorpay_order_id=order_id).select_related('user', 'course').first()
     if not payment:
+        return JsonResponse({'error': 'Order not found'}, status=404)
+
+    user = get_authenticated_user(request)
+    if user and payment.user_id != user.id:
         return JsonResponse({'error': 'Order not found'}, status=404)
 
     # If payment is not yet marked paid, verify directly with Razorpay API

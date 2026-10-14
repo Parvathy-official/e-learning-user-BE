@@ -780,4 +780,141 @@ class GuestCheckoutAndPasswordlessOTPSecurityTests(TestCase):
         lesson2 = next(l for l in lessons if str(l['id']) == str(self.lesson_a_protected.id))
         self.assertEqual(lesson2['description'], "")
 
+    # =========================================================
+    #  Completed Enrollment Access & Entitlement Tests
+    # =========================================================
+    def test_completed_enrollment_retains_course_and_video_access(self):
+        """
+        Verify that when a student's enrollment status is 'completed',
+        they retain full course access, video access, and course details without lock.
+        """
+        user_c = User.objects.create(email='completed_student@example.com', name='Completed Student')
+        tokens_c = generate_tokens(user_c)
+        auth_c = {'HTTP_AUTHORIZATION': f"Bearer {tokens_c['access']}"}
+
+        # Create completed enrollment
+        Enrollment.objects.create(
+            user=user_c,
+            course=self.course_a,
+            status='completed',
+            progress_percentage=100
+        )
+
+        # 1. Course access endpoint returns has_access: True
+        access_res = self.client.get(f'/api/courses/{self.course_a.id}/access/', **auth_c)
+        self.assertEqual(access_res.status_code, 200)
+        self.assertTrue(access_res.json()['has_access'])
+        self.assertEqual(access_res.json()['enrollment']['status'], 'completed')
+
+        # 2. Protected lesson video is accessible (200 OK, not 403)
+        video_res = self.client.get(
+            f'/api/courses/{self.course_a.id}/lessons/{self.lesson_a_protected.id}/video/',
+            **auth_c
+        )
+        self.assertEqual(video_res.status_code, 200)
+        self.assertIn('url', video_res.json())
+
+        # 3. Course detail endpoint recognizes enrolled status and unlocks all lessons
+        detail_res = self.client.get(f'/api/courses/{self.course_a.id}/', **auth_c)
+        self.assertEqual(detail_res.status_code, 200)
+        self.assertTrue(detail_res.json()['has_access'])
+        lessons = detail_res.json()['modules'][0]['lessons']
+        for l in lessons:
+            self.assertFalse(l['is_locked'], f"Lesson {l['title']} should not be locked for completed student")
+
+        # 4. OTP verification returns completed course in enrolled_course_ids
+        otp_verify_courses = list(
+            Enrollment.objects.filter(user=user_c, status__in=['active', 'completed']).values_list('course_id', flat=True)
+        )
+        self.assertIn(self.course_a.id, otp_verify_courses)
+
+    def test_completed_enrollment_cannot_duplicate_order(self):
+        """
+        A student who has already completed the course must not be charged again.
+        Calling payment create-order returns 409 Conflict.
+        """
+        user_c = User.objects.create(email='completed_buyer@example.com', name='Completed Buyer')
+        Enrollment.objects.create(
+            user=user_c,
+            course=self.course_a,
+            status='completed',
+            progress_percentage=100
+        )
+        tokens_c = generate_tokens(user_c)
+        auth_c = {'HTTP_AUTHORIZATION': f"Bearer {tokens_c['access']}"}
+
+        resp = self.client.post('/api/payments/create-order/', data=json.dumps({
+            'course_id': self.course_a.id,
+            'email': user_c.email,
+            'name': user_c.name,
+        }), content_type='application/json', **auth_c)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_completed_enrollment_progress_intact_upon_revisit(self):
+        """
+        When a completed student reopens the course and revisits lessons,
+        progress percentage and completed lessons remain intact.
+        """
+        user_c = User.objects.create(email='revisit_student@example.com', name='Revisit Student')
+        tokens_c = generate_tokens(user_c)
+        auth_c = {'HTTP_AUTHORIZATION': f"Bearer {tokens_c['access']}"}
+
+        enr = Enrollment.objects.create(
+            user=user_c,
+            course=self.course_a,
+            status='completed',
+            progress_percentage=100
+        )
+        LessonProgress.objects.create(
+            user=user_c,
+            lesson=self.lesson_a_protected,
+            watched_seconds=900,
+            duration_seconds=900,
+            progress_percentage=100,
+            completed=True
+        )
+
+        # Student re-fetches enrollments
+        resp = self.client.get('/api/enrollments/my/', **auth_c)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['status'], 'completed')
+        self.assertEqual(data[0]['progress_percentage'], 100)
+        self.assertIn(str(self.lesson_a_protected.id), data[0]['completed_lessons'])
+
+        # Refresh enrollment from db
+        enr.refresh_from_db()
+        self.assertEqual(enr.status, 'completed')
+        self.assertEqual(enr.progress_percentage, 100)
+
+    def test_pending_or_failed_payment_cannot_access_paid_content(self):
+        """
+        Students with pending or failed payments cannot access protected content.
+        """
+        unpaid_user = User.objects.create(email='unpaid_user@example.com', name='Unpaid User')
+        tokens = generate_tokens(unpaid_user)
+        auth = {'HTTP_AUTHORIZATION': f"Bearer {tokens['access']}"}
+
+        # Payment failed
+        Payment.objects.create(
+            user=unpaid_user,
+            course=self.course_a,
+            razorpay_order_id='order_failed_test',
+            amount=49900,
+            currency='INR',
+            status='failed'
+        )
+
+        access_res = self.client.get(f'/api/courses/{self.course_a.id}/access/', **auth)
+        self.assertEqual(access_res.status_code, 200)
+        self.assertFalse(access_res.json()['has_access'])
+
+        video_res = self.client.get(
+            f'/api/courses/{self.course_a.id}/lessons/{self.lesson_a_protected.id}/video/',
+            **auth
+        )
+        self.assertEqual(video_res.status_code, 403)
+
+
 
